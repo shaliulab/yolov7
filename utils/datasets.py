@@ -308,7 +308,7 @@ class LoadStreams:  # multiple IP or RTSP cameras
                 thread.start()
             
             elif any([url.endswith(img_format) for img_format in img_formats]):
-                img0 = load_image_in_loader(path)
+                img0 = load_image_in_loader(url)
                 img = process_image_in_loader(img0)
                 self.imgs[i] = img
                 print(f' success ({w}x{h}.')
