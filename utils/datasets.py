@@ -311,7 +311,7 @@ class LoadStreams:  # multiple IP or RTSP cameras
                 img = load_image_in_loader(url)
                 h, w = img.shape[:2]
                 self.imgs[i] = img
-                print(f' success ({w}x{h}.')
+                print(f' success ({w}x{h}).')
 
         print('')  # newline
 
