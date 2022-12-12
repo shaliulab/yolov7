@@ -132,9 +132,9 @@ def load_image_in_loader(path):
     #print(f'image {self.count}/{self.nf} {path}: ', end='')
     return img0
 
-def process_image_in_loader(img0):
+def process_image_in_loader(img0, img_size, stride):
     # Padded resize
-    img = letterbox(img0, self.img_size, stride=self.stride)[0]
+    img = letterbox(img0, img_size, stride=stride)[0]
 
     # Convert
     img = img[:, :, ::-1].transpose(2, 0, 1)  # BGR to RGB, to 3x416x416
@@ -201,7 +201,7 @@ class LoadImages:  # for inference
             self.count += 1
             img0 = load_image_in_loader(path)
             
-        img = process_image_in_loader(img0)
+        img = process_image_in_loader(img0, self.img_size, self.stride)
         return path, img, img0, self.cap
 
     def new_video(self, path):
@@ -309,7 +309,7 @@ class LoadStreams:  # multiple IP or RTSP cameras
             
             elif any([url.endswith(img_format) for img_format in img_formats]):
                 img0 = load_image_in_loader(url)
-                img = process_image_in_loader(img0)
+                img = process_image_in_loader(img0, self.img_size, self.stride)
                 self.imgs[i] = img
                 print(f' success ({w}x{h}.')
 
