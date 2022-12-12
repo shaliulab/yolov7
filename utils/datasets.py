@@ -125,6 +125,22 @@ class _RepeatSampler(object):
             yield from iter(self.sampler)
 
 
+
+def load_image_in_loader(path):
+    img0 = cv2.imread(path)  # BGR
+    assert img0 is not None, 'Image Not Found ' + path
+    #print(f'image {self.count}/{self.nf} {path}: ', end='')
+    return img0
+
+def process_image_in_loader(img0):
+    # Padded resize
+    img = letterbox(img0, self.img_size, stride=self.stride)[0]
+
+    # Convert
+    img = img[:, :, ::-1].transpose(2, 0, 1)  # BGR to RGB, to 3x416x416
+    img = np.ascontiguousarray(img)
+    return img
+
 class LoadImages:  # for inference
     def __init__(self, path, img_size=640, stride=32):
         p = str(Path(path).absolute())  # os-agnostic absolute path
@@ -183,17 +199,9 @@ class LoadImages:  # for inference
         else:
             # Read image
             self.count += 1
-            img0 = cv2.imread(path)  # BGR
-            assert img0 is not None, 'Image Not Found ' + path
-            #print(f'image {self.count}/{self.nf} {path}: ', end='')
-
-        # Padded resize
-        img = letterbox(img0, self.img_size, stride=self.stride)[0]
-
-        # Convert
-        img = img[:, :, ::-1].transpose(2, 0, 1)  # BGR to RGB, to 3x416x416
-        img = np.ascontiguousarray(img)
-
+            img0 = load_image_in_loader(path)
+            
+        img = process_image_in_loader(img0)
         return path, img, img0, self.cap
 
     def new_video(self, path):
@@ -286,16 +294,25 @@ class LoadStreams:  # multiple IP or RTSP cameras
                 check_requirements(('pafy', 'youtube_dl'))
                 import pafy
                 url = pafy.new(url).getbest(preftype="mp4").url
-            cap = cv2.VideoCapture(url)
-            assert cap.isOpened(), f'Failed to open {s}'
-            w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            self.fps = cap.get(cv2.CAP_PROP_FPS) % 100
+                
+            elif any([url.endswith(vid_format) for vid_format in vid_formats]):
+                cap = cv2.VideoCapture(url)
+                assert cap.isOpened(), f'Failed to open {s}'
+                w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                self.fps = cap.get(cv2.CAP_PROP_FPS) % 100
 
-            _, self.imgs[i] = cap.read()  # guarantee first frame
-            thread = Thread(target=self.update, args=([i, cap]), daemon=True)
-            print(f' success ({w}x{h} at {self.fps:.2f} FPS).')
-            thread.start()
+                _, self.imgs[i] = cap.read()  # guarantee first frame
+                thread = Thread(target=self.update, args=([i, cap]), daemon=True)
+                print(f' success ({w}x{h} at {self.fps:.2f} FPS).')
+                thread.start()
+            
+            elif any([url.endswith(img_format) for img_format in img_formats]): :
+                img0 = load_image_in_loader(path)
+                img = process_image_in_loader(img0)
+                self.imgs[i] = img
+                print(f' success ({w}x{h}.')
+
         print('')  # newline
 
         # check for common shapes
