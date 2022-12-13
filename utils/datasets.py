@@ -282,6 +282,11 @@ class LoadStreams:  # multiple IP or RTSP cameras
         self.imgs = [None] * min(n, self.max)
         self.sources = [clean_str(x) for x in sources]  # clean source names for later
 
+        if all([self.source_is_image(s) for s in self.sources]):
+            self.all_imgs = True
+        else:
+            self.all_imgs = False
+
         self.load_sources(self.sources)
 
         # check for common shapes
@@ -303,13 +308,18 @@ class LoadStreams:  # multiple IP or RTSP cameras
                 self.imgs[index] = im if success else self.imgs[index] * 0
                 n = 0
             time.sleep(1 / self.fps)  # wait time
-
+            
+            
+    @staticmethod
+    def source_is_image(s):
+        return s.split('.')[-1].lower() in img_formats
 
     def load_sources(self, sources):
+
         accum = 0
         for i, s in enumerate(sources[self.batch_count:(self.batch_count+self.max)]):
 
-            if s.split('.')[-1].lower() in img_formats:
+            if self.source_is_image(s):
                 self.imgs[i] = cv2.imread(s)
 
             else:
@@ -339,6 +349,9 @@ class LoadStreams:  # multiple IP or RTSP cameras
 
     def __iter__(self):
        self.count = -1
+       if self.all_imgs and self.batch_count >= len(self.sources):
+           yield self.sources, None, None, None
+
        return self
 
     def __next__(self):
