@@ -269,7 +269,7 @@ class LoadStreams:  # multiple IP or RTSP cameras
         self.img_size = img_size
         self.stride = stride
         self.max=32
-        self.count = -1
+        self.batch_count = 0
 
 
         if os.path.isfile(sources):
@@ -279,7 +279,7 @@ class LoadStreams:  # multiple IP or RTSP cameras
             sources = [sources]
 
         n = len(sources)
-        self.imgs = [None] * min(n, max)
+        self.imgs = [None] * min(n, self.max)
         self.sources = [clean_str(x) for x in sources]  # clean source names for later
 
         self.load_sources(self.sources)
@@ -305,8 +305,9 @@ class LoadStreams:  # multiple IP or RTSP cameras
             time.sleep(1 / self.fps)  # wait time
 
 
-    def load_sources(self, count, max):
-        for i, s in enumerate(sources[count:(count+max)]):
+    def load_sources(self, sources):
+        accum = 0
+        for i, s in enumerate(sources[self.batch_count:(self.batch_count+self.max)]):
 
             if s.split('.')[-1].lower() in img_formats:
                 self.imgs[i] = cv2.imread(s)
@@ -329,11 +330,16 @@ class LoadStreams:  # multiple IP or RTSP cameras
                 thread = Thread(target=self.update, args=([i, cap]), daemon=True)
                 print(f' success ({w}x{h} at {self.fps:.2f} FPS).')
                 thread.start()
+                
+            accum +=1
+                
+        self.batch_count += accum
 
         print('')  # newline
 
     def __iter__(self):
-        return self
+       self.count = -1
+       return self
 
     def __next__(self):
         self.count += 1
@@ -353,6 +359,7 @@ class LoadStreams:  # multiple IP or RTSP cameras
         # Convert
         img = img[:, :, :, ::-1].transpose(0, 3, 1, 2)  # BGR to RGB, to bsx3x416x416
         img = np.ascontiguousarray(img)
+        self.load_sources(self.sources)
 
         return self.sources, img, img0, None
 
