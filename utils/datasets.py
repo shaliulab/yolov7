@@ -268,7 +268,7 @@ class LoadStreams:  # multiple IP or RTSP cameras
         self.mode = 'stream'
         self.img_size = img_size
         self.stride = stride
-        self.max=32
+        self.max=5
         self.batch_count = 0
 
 
@@ -282,10 +282,13 @@ class LoadStreams:  # multiple IP or RTSP cameras
         self.imgs = [None] * min(n, self.max)
         self.sources = [clean_str(x) for x in sources]  # clean source names for later
 
+        self.read_sources = -1
+        self.source_indices = ()
         if all([self.source_is_image(s) for s in self.sources]):
             self.all_imgs = True
         else:
             self.all_imgs = False
+        self.mode="image"
 
         self.load_sources(self.sources)
 
@@ -317,7 +320,11 @@ class LoadStreams:  # multiple IP or RTSP cameras
     def load_sources(self, sources):
 
         accum = 0
-        for i, s in enumerate(sources[self.batch_count:(self.batch_count+self.max)]):
+        self.imgs = [None] * min(len(sources), self.max)
+
+        self.source_indices = (self.batch_count, self.batch_count+self.max)
+
+        for i, s in enumerate(sources[self.source_indices[0]:self.source_indices[1]]):
 
             if self.source_is_image(s):
                 self.imgs[i] = cv2.imread(s)
@@ -344,17 +351,19 @@ class LoadStreams:  # multiple IP or RTSP cameras
             accum +=1
                 
         self.batch_count += accum
+        self.read_sources = accum
 
         print('')  # newline
 
     def __iter__(self):
        self.count = -1
-       if self.all_imgs and self.batch_count >= len(self.sources):
-           yield self.sources, None, None, None
-
        return self
 
     def __next__(self):
+
+        if self.all_imgs and self.read_sources == 0:
+            raise StopIteration
+
         self.count += 1
         img0 = self.imgs.copy()
         img0 = [im for im in img0 if im is not None]
@@ -372,9 +381,10 @@ class LoadStreams:  # multiple IP or RTSP cameras
         # Convert
         img = img[:, :, :, ::-1].transpose(0, 3, 1, 2)  # BGR to RGB, to bsx3x416x416
         img = np.ascontiguousarray(img)
+        sources=self.sources[self.source_indices[0]:self.source_indices[1]]
         self.load_sources(self.sources)
 
-        return self.sources, img, img0, None
+        return sources, img, img0, None
 
     def __len__(self):
         return 0  # 1E12 frames = 32 streams at 30 FPS for 30 years
