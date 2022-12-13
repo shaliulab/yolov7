@@ -268,6 +268,8 @@ class LoadStreams:  # multiple IP or RTSP cameras
         self.mode = 'stream'
         self.img_size = img_size
         self.stride = stride
+        self.batch_size=32
+        self.count=0
 
         if os.path.isfile(sources):
             with open(sources, 'r') as f:
@@ -318,12 +320,15 @@ class LoadStreams:  # multiple IP or RTSP cameras
             time.sleep(1 / self.fps)  # wait time
 
     def __iter__(self):
-        self.count = -1
+        if self.count >= len(self.imgs):
+            yield (self.sources, None, None, None)
+
         return self
 
     def __next__(self):
-        self.count += 1
-        img0 = self.imgs.copy()
+        img0 = self.imgs[self.count:(self.count+self.batch_size)].copy()
+
+        self.count += len(img0)
         if cv2.waitKey(1) == ord('q'):  # q to quit
             cv2.destroyAllWindows()
             raise StopIteration
