@@ -276,6 +276,7 @@ class LoadStreams:  # multiple IP or RTSP cameras
         self.mode = 'stream'
         self.img_size = img_size
         self.stride = stride
+        self.count = -1
 
         if os.path.isfile(sources):
             with open(sources, 'r') as f:
@@ -335,7 +336,6 @@ class LoadStreams:  # multiple IP or RTSP cameras
             time.sleep(1 / self.fps)  # wait time
 
     def __iter__(self):
-        self.count = -1
         return self
 
     def __next__(self):
