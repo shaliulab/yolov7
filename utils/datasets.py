@@ -330,6 +330,7 @@ class LoadStreams:  # multiple IP or RTSP cameras
                 self.imgs[i] = cv2.imread(s)
 
             else:
+                n = len(sources)
                 # Start the thread to read frames from the video stream
                 print(f'{i + 1}/{n}: {s}... ', end='')
                 url = eval(s) if s.isnumeric() else s
