@@ -263,6 +263,76 @@ class LoadWebcam:  # for inference
         return 0
 
 
+class LoadH5py:
+
+    def __init__(self, sources="index.txt", img_size=640, stride=32):
+        self.mode="stream"
+        self.img_size=img_size
+        self.stride=stride
+
+        with open(sources, "r") as filehandle:
+            sources = [source.strip("\n") for source in filehandle.readlines()]
+        
+        self.sources = sources
+        for source in self.sources:
+            assert os.path.exists(source) and source.endswith(".h5py")
+        
+        self._n = -1
+        self._next_source()
+        self.imgs = collections.deque([], 2)
+
+    @property
+    def key(self):
+        return self.keys[self._key_n]
+    
+    def __iter__(self):
+        return self
+
+
+    def update(self):
+
+        while True:
+            with h5py.File(self.source, "r") as file:
+                while self._key_n < len(self.keys):
+                    img0 = file[self.key][:]
+                    self._key_n +=1
+
+                    while len(self.imgs) >= 2:
+                        time.sleep(1/self.fps)
+
+                    self.imgs.append(img0)
+
+            end = self._next_source()
+            if end:
+                break
+
+    def __next__(self):
+
+        img0 = self.imgs.pop(0)
+        # Letterbox
+        img = [letterbox(x, self.img_size, auto=self.rect, stride=self.stride)[0] for x in img0]
+
+        # Stack
+        img = np.stack(img, 0)
+
+        # Convert
+        img = img[:, :, :, ::-1].transpose(0, 3, 1, 2)  # BGR to RGB, to bsx3x416x416
+        img = np.ascontiguousarray(img)
+
+        return self.sources, img, img0, None
+                        
+
+    def _next_source(self):
+        self._n +=1
+        if self._n == len(self.sources):
+            return True
+        self.source = self.sources[self._n]
+        with h5py.File(self.source, "r") as file:
+            self.keys=self.file.keys()
+        self._key_n=0
+        return False
+        
+
 class LoadStreams:  # multiple IP or RTSP cameras
     def __init__(self, sources='streams.txt', img_size=640, stride=32):
         self.mode = 'stream'
