@@ -267,6 +267,87 @@ class LoadWebcam:  # for inference
 
 class LoadH5py:
 
+    def __init__(self, sources="index.txt", img_size=640, stride=32, framerate=1):
+        self.mode="stream"
+        self.img_size=img_size
+        self.stride=stride
+        self.rect=False
+
+        with open(sources, "r") as filehandle:
+            sources = [source.strip("\n") for source in filehandle.readlines()]
+        
+        self.sources = sources
+        for source in self.sources:
+            assert os.path.exists(source) and source.endswith(".hdf5")
+        
+        self._n = -1
+        self._next_source()
+        self.framerate=framerate
+
+
+    @property
+    def key(self):
+        return self.keys[self._key_n]
+    
+    def __iter__(self):
+        return self
+
+    def fetch_one_image(self, file):
+
+        img0 = file[self.key][:]
+        self._key_n +=1
+        end = False
+        if self._key_n == len(self.keys):
+            end_ = self._next_source()
+        if end:
+            return True
+
+        return True, np.stack([img0, img0, img0], axis=2)
+
+
+    def __next__(self):
+
+        while len(self.imgs) == 0:
+            time.sleep(1/10)
+
+        img0=[]
+        with h5py.File(self.source, "r") as file:
+            for pos in range(self._key_n, len(self.keys), self.framerate):
+                self._key_n = pos
+                img0.append(self.fetch_one_image(file))
+
+
+        self._key_n = pos + self.framerate
+
+        # Letterbox
+        img = [letterbox(x, self.img_size, auto=self.rect, stride=self.stride)[0] for x in img0]
+
+        # Stack
+        img = np.stack(img, 0)
+
+        # Convert
+        print(img.shape)
+        img = img[:, :, :, ::-1].transpose(0, 3, 1, 2)  # BGR to RGB, to bsx3x416x416
+        img = np.ascontiguousarray(img)
+
+        return self.sources, [img], [img0], None
+                        
+
+    def _next_source(self):
+        self._n +=1
+        if self._n == len(self.sources):
+            return True
+        self.source = self.sources[self._n]
+        print(f"Switching to {self.source}")
+        with h5py.File(self.source, "r") as file:
+            self.keys=list(file.keys())
+        print(f"There are {len(self.keys)} keys in this file")
+        self._key_n=0
+        return False
+
+
+class LoadH5py_deprecated:
+
     def __init__(self, sources="index.txt", img_size=640, stride=32):
         self.mode="stream"
         self.img_size=img_size
