@@ -26,7 +26,7 @@ def detect(save_img=None):
         ('rtsp://', 'rtmp://', 'http://', 'https://'))
     
     with open(source, "r") as filehandle:
-        if filehandle.readline().strip().endswith(".h5py"):
+        if filehandle.readline().strip().endswith(".hdf5"):
             webcam=False
             h5py_files=True
             
