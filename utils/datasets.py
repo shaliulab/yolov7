@@ -267,7 +267,7 @@ class LoadWebcam:  # for inference
 
 class LoadH5py:
 
-    def __init__(self, sources="index.txt", img_size=640, stride=32, framerate=1):
+    def __init__(self, sources="index.txt", img_size=640, stride=32, framerate=160):
         self.mode="stream"
         self.img_size=img_size
         self.stride=stride
@@ -287,37 +287,53 @@ class LoadH5py:
 
     @property
     def key(self):
-        return self.keys[self._key_n]
+        try:
+            k=self.keys[self._key_n]
+            print(k)
+            return k
+        except Exception as error:
+            print(self.source)
+            print(self.keys)
+            print(self._key_n)
+            raise error
+            
     
     def __iter__(self):
         return self
 
     def fetch_one_image(self, file):
 
-        img0 = file[self.key][:]
-        self._key_n +=1
-        end = False
-        if self._key_n == len(self.keys):
-            end_ = self._next_source()
-        if end:
-            return True
+        end=False
+        if self._key_n >= len(self.keys):
+            end = self._next_source()
+            return (end, )
 
-        return True, np.stack([img0, img0, img0], axis=2)
+        img0 = file[self.key][:]
+        return end, np.stack([img0, img0, img0], axis=2)
+
+
+    def move_through_h5py(self):
+
+        img0=[]
+
+        with h5py.File(self.source, "r") as file:
+            for i in range(100):
+                self._key_n += self.framerate
+                result = self.fetch_one_image(file)
+                if len(result) == 1 and not result[0]:
+                    img0=self.move_through_h5py()
+                elif result[0]:
+                    raise StopIteration
+                else:
+                    im=result[1]
+                    img0.append(im)
+
+        return img0
 
 
     def __next__(self):
 
-        while len(self.imgs) == 0:
-            time.sleep(1/10)
-
-        img0=[]
-        with h5py.File(self.source, "r") as file:
-            for pos in range(self._key_n, len(self.keys), self.framerate):
-                self._key_n = pos
-                img0.append(self.fetch_one_image(file))
-
-
-        self._key_n = pos + self.framerate
+        img0 = self.move_through_h5py()
 
         # Letterbox
         img = [letterbox(x, self.img_size, auto=self.rect, stride=self.stride)[0] for x in img0]
@@ -384,7 +400,6 @@ class LoadH5py_deprecated:
         if self._key_n == len(self.keys):
             print("POINT1", self._key_n, len(self.keys))
             end_ = self._next_source()
-            impprt ipdb; ipdb.set_trace()
         if end:
             return True
 
