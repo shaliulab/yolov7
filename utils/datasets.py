@@ -11,6 +11,7 @@ from itertools import repeat
 from multiprocessing.pool import ThreadPool
 from pathlib import Path
 from threading import Thread
+import collections
 
 import cv2
 import numpy as np
@@ -19,6 +20,7 @@ import torch.nn.functional as F
 from PIL import Image, ExifTags
 from torch.utils.data import Dataset
 from tqdm import tqdm
+import h5py
 
 import pickle
 from copy import deepcopy
@@ -269,17 +271,22 @@ class LoadH5py:
         self.mode="stream"
         self.img_size=img_size
         self.stride=stride
+        self.rect=False
 
         with open(sources, "r") as filehandle:
             sources = [source.strip("\n") for source in filehandle.readlines()]
         
         self.sources = sources
         for source in self.sources:
-            assert os.path.exists(source) and source.endswith(".h5py")
+            assert os.path.exists(source) and source.endswith(".hdf5")
         
         self._n = -1
         self._next_source()
-        self.imgs = collections.deque([], 2)
+        self.imgs = collections.deque([], 1)
+        thread = Thread(target=self.update, daemon=True)
+        #print(f' success ({w}x{h} at {self.fps:.2f} FPS).')
+        thread.start()
+
 
     @property
     def key(self):
@@ -288,27 +295,49 @@ class LoadH5py:
     def __iter__(self):
         return self
 
+    def fetch_one_image(self, file):
+
+        img0 = file[self.key][:]
+        self._key_n +=1
+        end = False
+        if self._key_n == len(self.keys):
+            print("POINT1", self._key_n, len(self.keys))
+            end_ = self._next_source()
+            impprt ipdb; ipdb.set_trace()
+        if end:
+            return True
+
+        return True, np.stack([img0, img0, img0], axis=2)
+
 
     def update(self):
 
-        while True:
+        updated_file = False
+        end = False
+        while not end:
             with h5py.File(self.source, "r") as file:
-                while self._key_n < len(self.keys):
-                    img0 = file[self.key][:]
-                    self._key_n +=1
+                while not updated_file:
+                    img0 = []
+                    for _ in range(5):
+                        im = self.fetch_one_image(file)
+                        if im is True:
+                            updated_file=True
+                        else:
+                            img0.append(im)
 
-                    while len(self.imgs) >= 2:
-                        time.sleep(1/self.fps)
-
+                    while len(self.imgs) == 1:
+                        time.sleep(1/10)
                     self.imgs.append(img0)
 
-            end = self._next_source()
-            if end:
-                break
+            if self._key_n == len(self.keys):
+                updated_file = self._next_source()
 
     def __next__(self):
 
-        img0 = self.imgs.pop(0)
+        while len(self.imgs) == 0:
+            time.sleep(1/10)
+
+        img0 = self.imgs.pop()
         # Letterbox
         img = [letterbox(x, self.img_size, auto=self.rect, stride=self.stride)[0] for x in img0]
 
@@ -316,10 +345,11 @@ class LoadH5py:
         img = np.stack(img, 0)
 
         # Convert
+        print(img.shape)
         img = img[:, :, :, ::-1].transpose(0, 3, 1, 2)  # BGR to RGB, to bsx3x416x416
         img = np.ascontiguousarray(img)
 
-        return self.sources, img, img0, None
+        return self.sources, [img], [img0], None
                         
 
     def _next_source(self):
@@ -327,8 +357,10 @@ class LoadH5py:
         if self._n == len(self.sources):
             return True
         self.source = self.sources[self._n]
+        print(f"Switching to {self.source}")
         with h5py.File(self.source, "r") as file:
-            self.keys=self.file.keys()
+            self.keys=list(file.keys())
+        print(f"There are {len(self.keys)} keys in this file")
         self._key_n=0
         return False
         
@@ -450,6 +482,7 @@ class LoadStreams:  # multiple IP or RTSP cameras
         img = np.stack(img, 0)
 
         # Convert
+        print(img.shape)
         img = img[:, :, :, ::-1].transpose(0, 3, 1, 2)  # BGR to RGB, to bsx3x416x416
         img = np.ascontiguousarray(img)
         sources=self.sources[self.source_indices[0]:self.source_indices[1]]
