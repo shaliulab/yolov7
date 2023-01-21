@@ -301,39 +301,43 @@ class LoadH5py:
     def __iter__(self):
         return self
 
-    def fetch_one_image(self, file):
+    def fetch_one_image(self, file, key):
 
         end=False
-        if self._key_n >= len(self.keys):
+        if key not in self.keys:
             end = self._next_source()
             return (end, )
 
-        img0 = file[self.key][:]
+        img0 = file[key][:]
         return end, np.stack([img0, img0, img0], axis=2)
 
 
     def move_through_h5py(self):
 
         img0=[]
+        keys=[]
+        source=self.source
 
-        with h5py.File(self.source, "r") as file:
+        with h5py.File(source, "r") as file:
             for i in range(100):
                 self._key_n += self.framerate
-                result = self.fetch_one_image(file)
+                key=self.key
+                result = self.fetch_one_image(file, key)
                 if len(result) == 1 and not result[0]:
-                    img0=self.move_through_h5py()
+                    img0, keys, source=self.move_through_h5py()
                 elif result[0]:
                     raise StopIteration
                 else:
                     im=result[1]
+                    keys.append(key)
                     img0.append(im)
 
-        return img0
+        return img0, keys, source
 
 
     def __next__(self):
 
-        img0 = self.move_through_h5py()
+        img0, keys, source = self.move_through_h5py()
 
         # Letterbox
         img = [letterbox(x, self.img_size, auto=self.rect, stride=self.stride)[0] for x in img0]
@@ -345,8 +349,8 @@ class LoadH5py:
         print(img.shape)
         img = img[:, :, :, ::-1].transpose(0, 3, 1, 2)  # BGR to RGB, to bsx3x416x416
         img = np.ascontiguousarray(img)
-
-        return self.sources, [img], [img0], None
+        paths = [source + k +".png" for k in keys]
+        return paths, [img], [img0], None
                         
 
     def _next_source(self):

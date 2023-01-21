@@ -9,7 +9,7 @@ import torch.backends.cudnn as cudnn
 from numpy import random
 
 from models.experimental import attempt_load
-from utils.datasets import LoadStreams, LoadImages
+from utils.datasets import LoadStreams, LoadImages, LoadH5py
 from utils.general import check_img_size, check_requirements, check_imshow, non_max_suppression, apply_classifier, \
     scale_coords, xyxy2xywh, strip_optimizer, set_logging, increment_path
 from utils.plots import plot_one_box
@@ -20,8 +20,17 @@ def detect(save_img=None):
     source, weights, view_img, save_txt, imgsz, trace, save_dir = opt.source, opt.weights, opt.view_img, opt.save_txt, opt.img_size, not opt.no_trace, opt.save_dir
     if save_img is None:
         save_img = not opt.nosave and not source.endswith('.txt')  # save inference images
+    
+    h5py_files=False
     webcam = source.isnumeric() or source.endswith('.txt') or source.lower().startswith(
         ('rtsp://', 'rtmp://', 'http://', 'https://'))
+    
+    with open(source, "r") as filehandle:
+        if filehandle.readline().strip().endswith(".h5py"):
+            webcam=False
+            h5py_files=True
+            
+
 
     # Directories
     if save_dir is None:
@@ -59,6 +68,8 @@ def detect(save_img=None):
         view_img = check_imshow()
         cudnn.benchmark = True  # set True to speed up constant image size inference
         dataset = LoadStreams(source, img_size=imgsz, stride=stride)
+    elif h5py_files:
+        dataset = LoadH5py(source, img_size=imgsz, stride=stride)
     else:
         dataset = LoadImages(source, img_size=imgsz, stride=stride)
 
@@ -113,7 +124,7 @@ def detect(save_img=None):
 
         # Process detections
         for i, det in enumerate(pred):  # detections per image
-            if webcam:  # batch_size >= 1
+            if webcam or h5py_files:  # batch_size >= 1
                 p, s, im0, frame = path[i], '%g: ' % i, im0s[i].copy(), dataset.count
             else:
                 p, s, im0, frame = path, '', im0s, getattr(dataset, 'frame', 0)
