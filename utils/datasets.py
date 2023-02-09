@@ -23,7 +23,7 @@ from tqdm import tqdm
 from imgstore.stores.utils.mixins.extract import _extract_store_metadata
 import re
 
-import h5py
+from flyhostel.data.hdf5 import HDF5ImagesReader
 
 import pickle
 from copy import deepcopy
@@ -268,145 +268,145 @@ class LoadWebcam:  # for inference
         return 0
 
 
-class IdtrackeraiLoader:
+# class IdtrackeraiLoader:
 
-    _EXTENSION=".hdf5"
+#     _EXTENSION=".hdf5"
     
-    def load_sources(self, metadata, chunks=None):
+#     def load_sources(self, metadata, chunks=None):
 
-       pattern=os.path.join(os.path.dirname(metadata), "idtrackerai", "session_*", "segmentation_data", "episode_images*.hdf5")
-       sources=glob.glob(pattern)
-       sources = sorted(sources, key=lambda f: int(os.path.splitext(f)[0].split("_")[-1]))
+#        pattern=os.path.join(os.path.dirname(metadata), "idtrackerai", "session_*", "segmentation_data", "episode_images*.hdf5")
+#        sources=glob.glob(pattern)
+#        sources = sorted(sources, key=lambda f: int(os.path.splitext(f)[0].split("_")[-1]))
 
-       self.sources = []
+#        self.sources = []
 
-       for source in sources:
-           assert os.path.exists(source) and source.endswith(self._EXTENSION)
-           if chunks:
-               for chunk in chunks:
-                   if re.search(f"session_{str(chunk).zfill(6)}", source):
-                       self.sources.append(source)
-                       break
-           else:
-               self.sources.append(source)
-       print(f"{len(self.sources)} sources detected")
+#        for source in sources:
+#            assert os.path.exists(source) and source.endswith(self._EXTENSION)
+#            if chunks:
+#                for chunk in chunks:
+#                    if re.search(f"session_{str(chunk).zfill(6)}", source):
+#                        self.sources.append(source)
+#                        break
+#            else:
+#                self.sources.append(source)
+#        print(f"{len(self.sources)} sources detected")
 
-    @property
-    def chunksize(self):
-        return int(self._experiment_metadata["chunksize"])
+#     @property
+#     def chunksize(self):
+#         return int(self._experiment_metadata["chunksize"])
  
-    @property
-    def framerate(self):
-        return int(self._experiment_metadata["framerate"])
+#     @property
+#     def framerate(self):
+#         return int(self._experiment_metadata["framerate"])
  
 
-class LoadH5py(IdtrackeraiLoader):
+# class LoadH5py(IdtrackeraiLoader):
 
-    def __init__(self, metadata="metadata.yaml", img_size=640, stride=32, freq=1, chunks=None):
-        self.mode="image"
-        self.img_size=img_size
-        self.stride=stride
-        self.rect=False
-        self.metadata = os.path.realpath(metadata)
-        self._experiment_metadata = _extract_store_metadata(metadata)
-        self._n = -1
-        self.load_sources(self.metadata, chunks=chunks)
-        self._next_source()
-        self.freq=freq
+#     def __init__(self, metadata="metadata.yaml", img_size=640, stride=32, freq=1, chunks=None):
+#         self.mode="image"
+#         self.img_size=img_size
+#         self.stride=stride
+#         self.rect=False
+#         self.metadata = os.path.realpath(metadata)
+#         self._experiment_metadata = _extract_store_metadata(metadata)
+#         self._n = -1
+#         self.load_sources(self.metadata, chunks=chunks)
+#         self._next_source()
+#         self.freq=freq
 
-    @property
-    def sampling_rate(self):
-        return int(self.framerate / self.freq)
+#     @property
+#     def sampling_rate(self):
+#         return int(self.framerate / self.freq)
 
 
-    @property
-    def count(self):
-        return int(self.key.split("-")[0])
+#     @property
+#     def count(self):
+#         return int(self.key.split("-")[0])
 
-    @property
-    def key(self):
-        try:
-            k=self.keys[self._key_n]
-            logger.debug(f"Key {k}")
-            return k
-        except Exception as error:
-            end = self._next_source()
-            if end: return True
-            else:
-                return None
+#     @property
+#     def key(self):
+#         try:
+#             k=self.keys[self._key_n]
+#             logger.debug(f"Key {k}")
+#             return k
+#         except Exception as error:
+#             end = self._next_source()
+#             if end: return True
+#             else:
+#                 return None
             
     
-    def __iter__(self):
-        return self
+#     def __iter__(self):
+#         return self
 
-    def fetch_one_image(self, file, key):
+#     def fetch_one_image(self, file, key):
 
-        img0 = file[key][:]
-        return np.stack([img0, img0, img0], axis=2)
+#         img0 = file[key][:]
+#         return np.stack([img0, img0, img0], axis=2)
 
 
-    def move_through_h5py(self):
+#     def move_through_h5py(self):
 
-        img0=[]
-        keys=[]
-        source=self.source
+#         img0=[]
+#         keys=[]
+#         source=self.source
 
-        with h5py.File(source, "r") as file:
-            for i in range(5):
-                self._key_n += self.sampling_rate
-                key=self.key
-                if key is None:
-                    return img0, keys, source
-                elif key is True:
-                    raise StopIteration
+#         with h5py.File(source, "r") as file:
+#             for i in range(5):
+#                 self._key_n += self.sampling_rate
+#                 key=self.key
+#                 if key is None:
+#                     return img0, keys, source
+#                 elif key is True:
+#                     raise StopIteration
  
-                im = self.fetch_one_image(file, key)
-                keys.append(key)
-                img0.append(im)
+#                 im = self.fetch_one_image(file, key)
+#                 keys.append(key)
+#                 img0.append(im)
 
-        if len(img0) == 0:
-            print("Error: early end detected")
-            raise StopIteration
-        return img0, keys, source
+#         if len(img0) == 0:
+#             print("Error: early end detected")
+#             raise StopIteration
+#         return img0, keys, source
 
 
-    def __next__(self):
+#     def __next__(self):
 
-        img0, keys, source = self.move_through_h5py()
+#         img0, keys, source = self.move_through_h5py()
 
-        # Letterbox
-        img = [letterbox(x, self.img_size, auto=self.rect, stride=self.stride)[0] for x in img0]
+#         # Letterbox
+#         img = [letterbox(x, self.img_size, auto=self.rect, stride=self.stride)[0] for x in img0]
 
-        # Stack
-        try:
-            img = np.stack(img, 0)
-        except:
-            import ipdb; ipdb.set_trace()
+#         # Stack
+#         try:
+#             img = np.stack(img, 0)
+#         except:
+#             import ipdb; ipdb.set_trace()
 
-        # Convert
-        img = img[:, :, :, ::-1].transpose(0, 3, 1, 2)  # BGR to RGB, to bsx3x416x416
-        img = np.ascontiguousarray(img)
-        chunk = int(re.search("session_([0-9]{6})/segmentation_data/episode_images", source).group(1))
+#         # Convert
+#         img = img[:, :, :, ::-1].transpose(0, 3, 1, 2)  # BGR to RGB, to bsx3x416x416
+#         img = np.ascontiguousarray(img)
+#         chunk = int(re.search("session_([0-9]{6})/segmentation_data/episode_images", source).group(1))
 
-        paths = []
-        for k in keys:
-            frame_number, blob_index = k.split("-")
-            frame_idx = int(frame_number) % (chunk * self.chunksize)
-            paths.append(f"{frame_number}_{chunk}-{frame_idx}-{blob_index}.png")
-        return paths, img, img0, None
+#         paths = []
+#         for k in keys:
+#             frame_number, blob_index = k.split("-")
+#             frame_idx = int(frame_number) % (chunk * self.chunksize)
+#             paths.append(f"{frame_number}_{chunk}-{frame_idx}-{blob_index}.png")
+#         return paths, img, img0, None
                         
 
-    def _next_source(self):
-        self._n +=1
-        if self._n == len(self.sources):
-            return True
-        self.source = self.sources[self._n]
-        print(f"<- {self.source}")
-        with h5py.File(self.source, "r") as file:
-            self.keys=list(file.keys())
-        logger.debug(f"There are {len(self.keys)} keys in this file")
-        self._key_n=0
-        return False
+#     def _next_source(self):
+#         self._n +=1
+#         if self._n == len(self.sources):
+#             return True
+#         self.source = self.sources[self._n]
+#         print(f"<- {self.source}")
+#         with h5py.File(self.source, "r") as file:
+#             self.keys=list(file.keys())
+#         logger.debug(f"There are {len(self.keys)} keys in this file")
+#         self._key_n=0
+#         return False
 
 
 class LoadH5py_deprecated:

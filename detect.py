@@ -9,7 +9,7 @@ import torch.backends.cudnn as cudnn
 from numpy import random
 
 from models.experimental import attempt_load
-from utils.datasets import LoadStreams, LoadImages, LoadH5py
+from utils.datasets import LoadStreams, LoadImages, HDF5ImagesReader
 from utils.general import check_img_size, check_requirements, check_imshow, non_max_suppression, apply_classifier, \
     scale_coords, xyxy2xywh, strip_optimizer, set_logging, increment_path
 from utils.plots import plot_one_box
@@ -69,8 +69,7 @@ def detect(save_img=None):
         cudnn.benchmark = True  # set True to speed up constant image size inference
         dataset = LoadStreams(source, img_size=imgsz, stride=stride)
     elif h5py_files:
-        chunks=None
-        dataset = LoadH5py(metadata=source, img_size=imgsz, stride=stride, chunks=chunks)
+        dataset = HDF5ImagesReader.from_sources(metadata=source, img_size=imgsz, stride=stride, chunks=None)
     else:
         dataset = LoadImages(source, img_size=imgsz, stride=stride)
 
