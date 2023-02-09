@@ -20,6 +20,9 @@ import torch.nn.functional as F
 from PIL import Image, ExifTags
 from torch.utils.data import Dataset
 from tqdm import tqdm
+from imgstore.stores.utils.mixins.extract import _extract_store_metadata
+import re
+
 import h5py
 
 import pickle
@@ -265,37 +268,72 @@ class LoadWebcam:  # for inference
         return 0
 
 
-class LoadH5py:
+class IdtrackeraiLoader:
 
-    def __init__(self, sources="index.txt", img_size=640, stride=32, framerate=160):
-        self.mode="stream"
+    _EXTENSION=".hdf5"
+    
+    def load_sources(self, metadata, chunks=None):
+
+       pattern=os.path.join(os.path.dirname(metadata), "idtrackerai", "session_*", "segmentation_data", "episode_images*.hdf5")
+       sources=glob.glob(pattern)
+       sources = sorted(sources, key=lambda f: int(os.path.splitext(f)[0].split("_")[-1]))
+
+       self.sources = []
+
+       for source in sources:
+           assert os.path.exists(source) and source.endswith(self._EXTENSION)
+           if chunks:
+               for chunk in chunks:
+                   if re.search(f"session_{str(chunk).zfill(6)}", source):
+                       self.sources.append(source)
+                       break
+           else:
+               self.sources.append(source)
+       print(f"{len(self.sources)} sources detected")
+
+    @property
+    def chunksize(self):
+        return int(self._experiment_metadata["chunksize"])
+ 
+    @property
+    def framerate(self):
+        return int(self._experiment_metadata["framerate"])
+ 
+
+class LoadH5py(IdtrackeraiLoader):
+
+    def __init__(self, metadata="metadata.yaml", img_size=640, stride=32, freq=1, chunks=None):
+        self.mode="image"
         self.img_size=img_size
         self.stride=stride
         self.rect=False
-
-        with open(sources, "r") as filehandle:
-            sources = [source.strip("\n") for source in filehandle.readlines()]
-        
-        self.sources = sources
-        for source in self.sources:
-            assert os.path.exists(source) and source.endswith(".hdf5")
-        
+        self.metadata = os.path.realpath(metadata)
+        self._experiment_metadata = _extract_store_metadata(metadata)
         self._n = -1
+        self.load_sources(self.metadata, chunks=chunks)
         self._next_source()
-        self.framerate=framerate
+        self.freq=freq
 
+    @property
+    def sampling_rate(self):
+        return int(self.framerate / self.freq)
+
+
+    @property
+    def count(self):
+        return int(self.key.split("-")[0])
 
     @property
     def key(self):
         try:
             k=self.keys[self._key_n]
-            print(k)
+            logger.debug(f"Key {k}")
             return k
         except Exception as error:
-            print(self.source)
-            print(self.keys)
-            print(self._key_n)
-            raise error
+            end = self._next_source()
+            if end: return True
+            else:
+                return None
             
     
     def __iter__(self):
@@ -303,13 +341,8 @@ class LoadH5py:
 
     def fetch_one_image(self, file, key):
 
-        end=False
-        if key not in self.keys:
-            end = self._next_source()
-            return (end, )
-
         img0 = file[key][:]
-        return end, np.stack([img0, img0, img0], axis=2)
+        return np.stack([img0, img0, img0], axis=2)
 
 
     def move_through_h5py(self):
@@ -319,19 +352,21 @@ class LoadH5py:
         source=self.source
 
         with h5py.File(source, "r") as file:
-            for i in range(100):
-                self._key_n += self.framerate
+            for i in range(5):
+                self._key_n += self.sampling_rate
                 key=self.key
-                result = self.fetch_one_image(file, key)
-                if len(result) == 1 and not result[0]:
-                    img0, keys, source=self.move_through_h5py()
-                elif result[0]:
+                if key is None:
+                    return img0, keys, source
+                elif key is True:
                     raise StopIteration
-                else:
-                    im=result[1]
-                    keys.append(key)
-                    img0.append(im)
+ 
+                im = self.fetch_one_image(file, key)
+                keys.append(key)
+                img0.append(im)
 
+        if len(img0) == 0:
+            print("Error: early end detected")
+            raise StopIteration
         return img0, keys, source
 
 
@@ -343,14 +378,22 @@ class LoadH5py:
         img = [letterbox(x, self.img_size, auto=self.rect, stride=self.stride)[0] for x in img0]
 
         # Stack
-        img = np.stack(img, 0)
+        try:
+            img = np.stack(img, 0)
+        except:
+            import ipdb; ipdb.set_trace()
 
         # Convert
-        print(img.shape)
         img = img[:, :, :, ::-1].transpose(0, 3, 1, 2)  # BGR to RGB, to bsx3x416x416
         img = np.ascontiguousarray(img)
-        paths = [source + k +".png" for k in keys]
-        return paths, [img], [img0], None
+        chunk = int(re.search("session_([0-9]{6})/segmentation_data/episode_images", source).group(1))
+
+        paths = []
+        for k in keys:
+            frame_number, blob_index = k.split("-")
+            frame_idx = int(frame_number) % (chunk * self.chunksize)
+            paths.append(f"{frame_number}_{chunk}-{frame_idx}-{blob_index}.png")
+        return paths, img, img0, None
                         
 
     def _next_source(self):
@@ -358,10 +401,10 @@ class LoadH5py:
         if self._n == len(self.sources):
             return True
         self.source = self.sources[self._n]
-        print(f"Switching to {self.source}")
+        print(f"<- {self.source}")
         with h5py.File(self.source, "r") as file:
             self.keys=list(file.keys())
-        print(f"There are {len(self.keys)} keys in this file")
+        logger.debug(f"There are {len(self.keys)} keys in this file")
         self._key_n=0
         return False
 

@@ -26,11 +26,10 @@ def detect(save_img=None):
         ('rtsp://', 'rtmp://', 'http://', 'https://'))
     
     with open(source, "r") as filehandle:
-        if filehandle.readline().strip().endswith(".hdf5"):
+        if source.endswith(".yaml") or filehandle.readline().strip().endswith(".hdf5"):
             webcam=False
             h5py_files=True
             
-
 
     # Directories
     if save_dir is None:
@@ -39,6 +38,7 @@ def detect(save_img=None):
         save_dir = Path(Path(save_dir) / opt.name, exist_ok=opt.exist_ok)  # increment run
 
     (save_dir / 'labels' if save_txt else save_dir).mkdir(parents=True, exist_ok=True)  # make dir
+    print(f"Results will be saved to --> {save_dir}")
 
     # Initialize
     set_logging()
@@ -69,7 +69,8 @@ def detect(save_img=None):
         cudnn.benchmark = True  # set True to speed up constant image size inference
         dataset = LoadStreams(source, img_size=imgsz, stride=stride)
     elif h5py_files:
-        dataset = LoadH5py(source, img_size=imgsz, stride=stride)
+        chunks=None
+        dataset = LoadH5py(metadata=source, img_size=imgsz, stride=stride, chunks=chunks)
     else:
         dataset = LoadImages(source, img_size=imgsz, stride=stride)
 
@@ -132,6 +133,7 @@ def detect(save_img=None):
             p = Path(p)  # to Path
             save_path = str(save_dir / p.name)  # img.jpg
             txt_path = str(save_dir / 'labels' / p.stem) + ('' if dataset.mode == 'image' else f'_{frame}')  # img.txt
+            print(save_path, txt_path)
             gn = torch.tensor(im0.shape)[[1, 0, 1, 0]]  # normalization gain whwh
             if len(det):
                 # Rescale boxes from img_size to im0 size
