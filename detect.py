@@ -69,7 +69,7 @@ def detect(save_img=None):
         cudnn.benchmark = True  # set True to speed up constant image size inference
         dataset = LoadStreams(source, img_size=imgsz, stride=stride)
     elif h5py_files:
-        dataset = HDF5ImagesReader.from_sources(metadata=source, img_size=imgsz, stride=stride, chunks=None)
+        dataset = HDF5ImagesReader.from_sources(mode="yolov7", metadata=source, img_size=imgsz, stride=stride, chunks=None)
     else:
         dataset = LoadImages(source, img_size=imgsz, stride=stride)
 
