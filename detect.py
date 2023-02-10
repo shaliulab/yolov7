@@ -17,7 +17,7 @@ from utils.torch_utils import select_device, load_classifier, time_synchronized,
 
 
 def detect(save_img=None):
-    source, weights, view_img, save_txt, imgsz, trace, save_dir = opt.source, opt.weights, opt.view_img, opt.save_txt, opt.img_size, not opt.no_trace, opt.save_dir
+    source, weights, view_img, save_txt, imgsz, trace, save_dir, opt.chunks = opt.source, opt.weights, opt.view_img, opt.save_txt, opt.img_size, not opt.no_trace, opt.save_dir, opt.chunks
     if save_img is None:
         save_img = not opt.nosave and not source.endswith('.txt')  # save inference images
     
@@ -69,7 +69,7 @@ def detect(save_img=None):
         cudnn.benchmark = True  # set True to speed up constant image size inference
         dataset = LoadStreams(source, img_size=imgsz, stride=stride)
     elif h5py_files:
-        dataset = HDF5ImagesReader.from_sources(mode="yolov7", metadata=source, img_size=imgsz, stride=stride, chunks=None)
+        dataset = HDF5ImagesReader.from_sources(consumer="yolov7", metadata=source, img_size=imgsz, stride=stride, chunks=opt.chunks)
     else:
         dataset = LoadImages(source, img_size=imgsz, stride=stride)
 
@@ -205,6 +205,7 @@ if __name__ == '__main__':
     parser.add_argument('--save-dir', type=str, help='Output directory', default=None)
     parser.add_argument('--nosave', action='store_true', help='do not save images/videos')
     parser.add_argument('--classes', nargs='+', type=int, help='filter by class: --class 0, or --class 0 2 3')
+    parser.add_argument('--chunks', nargs='+', type=int, help='filter by chunk: --chunks 50 51 52', default=None)
     parser.add_argument('--agnostic-nms', action='store_true', help='class-agnostic NMS')
     parser.add_argument('--augment', action='store_true', help='augmented inference')
     parser.add_argument('--update', action='store_true', help='update all models')
