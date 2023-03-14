@@ -9,7 +9,7 @@ import torch.backends.cudnn as cudnn
 from numpy import random
 
 from models.experimental import attempt_load
-from utils.datasets import LoadStreams, LoadImages, HDF5ImagesReader
+from utils.datasets import LoadStreams, LoadImages, HDF5ImagesReader, MP4Reader
 from utils.general import check_img_size, check_requirements, check_imshow, non_max_suppression, apply_classifier, \
     scale_coords, xyxy2xywh, strip_optimizer, set_logging, increment_path
 from utils.plots import plot_one_box
@@ -22,13 +22,14 @@ def detect(save_img=None):
         save_img = not opt.nosave and not source.endswith('.txt')  # save inference images
     
     h5py_files=False
+    mp4_reader=False
     webcam = source.isnumeric() or source.endswith('.txt') or source.lower().startswith(
         ('rtsp://', 'rtmp://', 'http://', 'https://'))
     
     with open(source, "r") as filehandle:
         if source.endswith(".yaml") or filehandle.readline().strip().endswith(".hdf5"):
             webcam=False
-            h5py_files=True
+            mp4_reader=True
             
 
     # Directories
@@ -70,6 +71,8 @@ def detect(save_img=None):
         dataset = LoadStreams(source, img_size=imgsz, stride=stride)
     elif h5py_files:
         dataset = HDF5ImagesReader.from_sources(consumer="yolov7", metadata=source, img_size=imgsz, stride=stride, chunks=opt.chunks)
+    elif mp4_reader:
+        dataset = MP4Reader.from_store_path(consumer="yolov7", store_path=source, img_size=imgsz, stride=stride, chunks=opt.chunks, width=150, height=150, resolution=(150, 150), frequency=opt.framerate)
     else:
         dataset = LoadImages(source, img_size=imgsz, stride=stride)
 
@@ -124,7 +127,7 @@ def detect(save_img=None):
 
         # Process detections
         for i, det in enumerate(pred):  # detections per image
-            if webcam or h5py_files:  # batch_size >= 1
+            if webcam or h5py_files or mp4_reader:  # batch_size >= 1
                 p, s, im0, frame = path[i], '%g: ' % i, im0s[i].copy(), dataset.count
             else:
                 p, s, im0, frame = path, '', im0s, getattr(dataset, 'frame', 0)
@@ -206,6 +209,7 @@ if __name__ == '__main__':
     parser.add_argument('--nosave', action='store_true', help='do not save images/videos')
     parser.add_argument('--classes', nargs='+', type=int, help='filter by class: --class 0, or --class 0 2 3')
     parser.add_argument('--chunks', nargs='+', type=int, help='filter by chunk: --chunks 50 51 52', default=None)
+    parser.add_argument('--framerate', type=int, help='Frames processed per second. If less than framerate of input, frames will be skipped. Defaults to None, i.e. all frames are processed', default=None)
     parser.add_argument('--agnostic-nms', action='store_true', help='class-agnostic NMS')
     parser.add_argument('--augment', action='store_true', help='augmented inference')
     parser.add_argument('--update', action='store_true', help='update all models')

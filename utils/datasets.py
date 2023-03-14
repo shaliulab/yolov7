@@ -24,6 +24,7 @@ from imgstore.stores.utils.mixins.extract import _extract_store_metadata
 import re
 
 from flyhostel.data.hdf5 import HDF5ImagesReader
+from flyhostel.data.video.reader import MP4Reader
 
 import pickle
 from copy import deepcopy
@@ -271,7 +272,7 @@ class LoadWebcam:  # for inference
 # class IdtrackeraiLoader:
 
 #     _EXTENSION=".hdf5"
-    
+
 #     def load_sources(self, metadata, chunks=None):
 
 #        pattern=os.path.join(os.path.dirname(metadata), "idtrackerai", "session_*", "segmentation_data", "episode_images*.hdf5")
@@ -294,11 +295,11 @@ class LoadWebcam:  # for inference
 #     @property
 #     def chunksize(self):
 #         return int(self._experiment_metadata["chunksize"])
- 
+
 #     @property
 #     def framerate(self):
 #         return int(self._experiment_metadata["framerate"])
- 
+
 
 # class LoadH5py(IdtrackeraiLoader):
 
@@ -334,8 +335,8 @@ class LoadWebcam:  # for inference
 #             if end: return True
 #             else:
 #                 return None
-            
-    
+
+
 #     def __iter__(self):
 #         return self
 
@@ -359,7 +360,7 @@ class LoadWebcam:  # for inference
 #                     return img0, keys, source
 #                 elif key is True:
 #                     raise StopIteration
- 
+
 #                 im = self.fetch_one_image(file, key)
 #                 keys.append(key)
 #                 img0.append(im)
@@ -394,7 +395,7 @@ class LoadWebcam:  # for inference
 #             frame_idx = int(frame_number) % (chunk * self.chunksize)
 #             paths.append(f"{frame_number}_{chunk}-{frame_idx}-{blob_index}.png")
 #         return paths, img, img0, None
-                        
+
 
 #     def _next_source(self):
 #         self._n +=1
@@ -419,11 +420,11 @@ class LoadH5py_deprecated:
 
         with open(sources, "r") as filehandle:
             sources = [source.strip("\n") for source in filehandle.readlines()]
-        
+
         self.sources = sources
         for source in self.sources:
             assert os.path.exists(source) and source.endswith(".hdf5")
-        
+
         self._n = -1
         self._next_source()
         self.imgs = collections.deque([], 1)
@@ -435,7 +436,7 @@ class LoadH5py_deprecated:
     @property
     def key(self):
         return self.keys[self._key_n]
-    
+
     def __iter__(self):
         return self
 
@@ -493,7 +494,7 @@ class LoadH5py_deprecated:
         img = np.ascontiguousarray(img)
 
         return self.sources, [img], [img0], None
-                        
+
 
     def _next_source(self):
         self._n +=1
@@ -506,7 +507,7 @@ class LoadH5py_deprecated:
         print(f"There are {len(self.keys)} keys in this file")
         self._key_n=0
         return False
-        
+
 
 class LoadStreams:  # multiple IP or RTSP cameras
     def __init__(self, sources='streams.txt', img_size=640, stride=32):
@@ -538,7 +539,16 @@ class LoadStreams:  # multiple IP or RTSP cameras
         self.load_sources(self.sources)
 
         # check for common shapes
-        s = np.stack([letterbox(x, self.img_size, stride=self.stride)[0].shape for x in self.imgs], 0)  # shapes
+        if len(self.imgs) == 0:
+            self._empty=True
+            self.rect=True
+            return
+
+
+        else:
+            self._empty=False
+            s = np.stack([letterbox(x, self.img_size, stride=self.stride)[0].shape for x in self.imgs], 0)  # shapes
+
         self.rect = np.unique(s, axis=0).shape[0] == 1  # rect inference if all shapes equal
         if not self.rect:
             print('WARNING: Different stream shapes detected. For optimal performance supply similarly-shaped streams.')
@@ -556,8 +566,8 @@ class LoadStreams:  # multiple IP or RTSP cameras
                 self.imgs[index] = im if success else self.imgs[index] * 0
                 n = 0
             time.sleep(1 / self.fps)  # wait time
-            
-            
+
+
     @staticmethod
     def source_is_image(s):
         return s.split('.')[-1].lower() in img_formats
@@ -593,9 +603,9 @@ class LoadStreams:  # multiple IP or RTSP cameras
                 thread = Thread(target=self.update, args=([i, cap]), daemon=True)
                 print(f' success ({w}x{h} at {self.fps:.2f} FPS).')
                 thread.start()
-                
+
             accum +=1
-                
+
         self.batch_count += accum
         self.read_sources = accum
 
@@ -607,7 +617,7 @@ class LoadStreams:  # multiple IP or RTSP cameras
 
     def __next__(self):
 
-        if self.all_imgs and self.read_sources == 0:
+        if (self.all_imgs and self.read_sources == 0) or self._empty:
             raise StopIteration
 
         self.count += 1
@@ -654,7 +664,7 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         self.mosaic = self.augment and not self.rect  # load 4 images at a time into a mosaic (only during training)
         self.mosaic_border = [-img_size // 2, -img_size // 2]
         self.stride = stride
-        self.path = path        
+        self.path = path
         #self.albumentations = Albumentations() if augment else None
 
         try:
@@ -869,8 +879,8 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
                                                  scale=hyp['scale'],
                                                  shear=hyp['shear'],
                                                  perspective=hyp['perspective'])
-            
-            
+
+
             #img, labels = self.albumentations(img, labels)
 
             # Augment colorspace
@@ -879,9 +889,9 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
             # Apply cutouts
             # if random.random() < 0.9:
             #     labels = cutout(img, labels)
-            
+
             if random.random() < hyp['paste_in']:
-                sample_labels, sample_images, sample_masks = [], [], [] 
+                sample_labels, sample_images, sample_masks = [], [], []
                 while len(sample_labels) < 30:
                     sample_labels_, sample_images_, sample_masks_ = load_samples(self, random.randint(0, len(self.labels) - 1))
                     sample_labels += sample_labels_
@@ -1218,7 +1228,7 @@ def remove_background(img, labels, segments):
         cv2.drawContours(im_new, [segments[j].astype(np.int32)], -1, (255, 255, 255), cv2.FILLED)
 
         result = cv2.bitwise_and(src1=img, src2=im_new)
-        
+
         i = result > 0  # pixels to replace
         img_new[i] = result[i]  # cv2.imwrite('debug.jpg', img)  # debug
 
@@ -1235,19 +1245,19 @@ def sample_segments(img, labels, segments, probability=0.5):
         h, w, c = img.shape  # height, width, channels
         for j in random.sample(range(n), k=round(probability * n)):
             l, s = labels[j], segments[j]
-            box = l[1].astype(int).clip(0,w-1), l[2].astype(int).clip(0,h-1), l[3].astype(int).clip(0,w-1), l[4].astype(int).clip(0,h-1) 
-            
+            box = l[1].astype(int).clip(0,w-1), l[2].astype(int).clip(0,h-1), l[3].astype(int).clip(0,w-1), l[4].astype(int).clip(0,h-1)
+
             #print(box)
             if (box[2] <= box[0]) or (box[3] <= box[1]):
                 continue
-            
+
             sample_labels.append(l[0])
-            
+
             mask = np.zeros(img.shape, np.uint8)
-            
+
             cv2.drawContours(mask, [segments[j].astype(np.int32)], -1, (255, 255, 255), cv2.FILLED)
             sample_masks.append(mask[box[1]:box[3],box[0]:box[2],:])
-            
+
             result = cv2.bitwise_and(src1=img, src2=mask)
             i = result > 0  # pixels to replace
             mask[i] = result[i]  # cv2.imwrite('debug.jpg', img)  # debug
@@ -1421,7 +1431,7 @@ def bbox_ioa(box1, box2):
 
     # Intersection over box2 area
     return inter_area / box2_area
-    
+
 
 def cutout(image, labels):
     # Applies image cutout augmentation https://arxiv.org/abs/1708.04552
@@ -1449,7 +1459,7 @@ def cutout(image, labels):
             labels = labels[ioa < 0.60]  # remove >60% obscured labels
 
     return labels
-    
+
 
 def pastein(image, labels, sample_labels, sample_images, sample_masks):
     # Applies image cutout augmentation https://arxiv.org/abs/1708.04552
@@ -1467,14 +1477,14 @@ def pastein(image, labels, sample_labels, sample_images, sample_masks):
         xmin = max(0, random.randint(0, w) - mask_w // 2)
         ymin = max(0, random.randint(0, h) - mask_h // 2)
         xmax = min(w, xmin + mask_w)
-        ymax = min(h, ymin + mask_h)   
-        
+        ymax = min(h, ymin + mask_h)
+
         box = np.array([xmin, ymin, xmax, ymax], dtype=np.float32)
         if len(labels):
-            ioa = bbox_ioa(box, labels[:, 1:5])  # intersection over area     
+            ioa = bbox_ioa(box, labels[:, 1:5])  # intersection over area
         else:
             ioa = np.zeros(1)
-        
+
         if (ioa < 0.30).all() and len(sample_labels) and (xmax > xmin+20) and (ymax > ymin+20):  # allow 30% obscuration of existing labels
             sel_ind = random.randint(0, len(sample_labels)-1)
             #print(len(sample_labels))
@@ -1487,7 +1497,7 @@ def pastein(image, labels, sample_labels, sample_images, sample_masks):
             r_scale = min((ymax-ymin)/hs, (xmax-xmin)/ws)
             r_w = int(ws*r_scale)
             r_h = int(hs*r_scale)
-            
+
             if (r_w > 10) and (r_h > 10):
                 r_mask = cv2.resize(sample_masks[sel_ind], (r_w, r_h))
                 r_image = cv2.resize(sample_images[sel_ind], (r_w, r_h))
@@ -1503,7 +1513,7 @@ def pastein(image, labels, sample_labels, sample_images, sample_masks):
                         labels = np.concatenate((labels, [[sample_labels[sel_ind], *box]]), 0)
                     else:
                         labels = np.array([[sample_labels[sel_ind], *box]])
-                              
+
                     image[ymin:ymin+r_h, xmin:xmin+r_w] = temp_crop
 
     return labels
@@ -1604,8 +1614,8 @@ def autosplit(path='../coco', weights=(0.9, 0.1, 0.0), annotated_only=False):
         if not annotated_only or Path(img2label_paths([str(img)])[0]).exists():  # check label
             with open(path / txt[i], 'a') as f:
                 f.write(str(img) + '\n')  # add image to txt file
-    
-    
+
+
 def load_segmentations(self, index):
     key = '/work/handsomejw66/coco17/' + self.img_files[index]
     #print(key)
