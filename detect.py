@@ -155,11 +155,11 @@ def detect(save_img=None):
                     if save_txt:
                         xywh = (xyxy2xywh(torch.tensor(xyxy).view(1, 4)) / gn).view(-1).tolist()  # normalized xywh
                         line = (cls, *xywh, conf) if opt.save_conf else (cls, *xywh)  # label format
-                        lines.append(line)
+                        lines.append(('%g ' * len(line)).rstrip() % line + '\n')
 
                 # Write results
                 if save_txt:  # Write to file
-                    file_content = "\n".join(lines)
+                    file_content = "".join(lines)
                     with open(txt_path + '.txt', 'w') as f:
                         f.write(file_content)
  
