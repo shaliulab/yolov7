@@ -8,12 +8,12 @@ import torch
 import torch.backends.cudnn as cudnn
 from numpy import random
 
-from models.experimental import attempt_load
-from utils.datasets import LoadStreams, LoadImages, HDF5ImagesReader, MP4Reader
-from utils.general import check_img_size, check_requirements, check_imshow, non_max_suppression, apply_classifier, \
+from yolov7.models.experimental import attempt_load
+from yolov7.utils.datasets import LoadStreams, LoadImages, HDF5ImagesReader, MP4Reader
+from yolov7.utils.general import check_img_size, check_requirements, check_imshow, non_max_suppression, apply_classifier, \
     scale_coords, xyxy2xywh, strip_optimizer, set_logging, increment_path
-from utils.plots import plot_one_box
-from utils.torch_utils import select_device, load_classifier, time_synchronized, TracedModel
+from yolov7.utils.plots import plot_one_box
+from yolov7.utils.torch_utils import select_device, load_classifier, time_synchronized, TracedModel
 
 
 def detect(save_img=None):
@@ -198,7 +198,8 @@ def detect(save_img=None):
     print(f'Done. ({time.time() - t0:.3f}s)')
 
 
-if __name__ == '__main__':
+
+def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--weights', nargs='+', type=str, default='yolov7.pt', help='model.pt path(s)')
     parser.add_argument('--source', type=str, default='inference/images', help='source')  # file/folder, 0 for webcam
@@ -233,3 +234,7 @@ if __name__ == '__main__':
                 strip_optimizer(opt.weights)
         else:
             detect(save_img=opt.save_img)
+
+
+if __name__ == '__main__':
+    main()
