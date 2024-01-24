@@ -16,12 +16,13 @@ setup(
         'Operating System :: OS Independent',
     ],
     # python_requires='>=3.10.11',  # Specify your minimal Python version
-    # install_requires=[
+    install_requires=[
+        "pillow", "torch", "torchvision",
     #     "pandas>=1.3.5",
     #     "plotly>=5.16.1",
     #     "joblib>=1.3.2",
     #     # Add more packages as needed
-    # ],
+    ],
     entry_points={
         'console_scripts': [
             'yolov7-detect=yolov7.detect:main',
