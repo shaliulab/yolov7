@@ -6,7 +6,6 @@ import torch
 import yaml
 from tqdm import tqdm
 
-sys.path.append(str(Path(__file__).parent.parent.parent))  # add utils/ to path
 from yolov7.utils.datasets import LoadImagesAndLabels
 from yolov7.utils.datasets import img2label_paths
 from yolov7.utils.general import colorstr, xywh2xyxy, check_dataset

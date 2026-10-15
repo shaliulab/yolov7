@@ -3,10 +3,14 @@ import logging
 import math
 import os
 import random
+import sys
 import time
 from copy import deepcopy
 from pathlib import Path
 from threading import Thread
+
+if not __package__:  # run as a script (python yolov7/train.py): make the yolov7 package importable
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import numpy as np
 import torch.distributed as dist
@@ -21,21 +25,41 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
-import test  # import test.py to get mAP after each epoch
-from models.experimental import attempt_load
-from models.yolo import Model
+from yolov7 import test  # import test.py to get mAP after each epoch
+from yolov7.models.experimental import attempt_load
+from yolov7.models.yolo import Model
 from yolov7.utils.autoanchor import check_anchors
+from yolov7.utils.checkpoint import load_checkpoint
 from yolov7.utils.datasets import create_dataloader
 from yolov7.utils.general import labels_to_class_weights, increment_path, labels_to_image_weights, init_seeds, \
-    fitness, strip_optimizer, get_latest_run, check_dataset, check_file, check_git_status, check_img_size, \
-    check_requirements, print_mutation, set_logging, one_cycle, colorstr
+    fitness, strip_optimizer, get_latest_run, check_dataset, check_file, check_img_size, print_mutation, \
+    set_logging, one_cycle, colorstr
 from yolov7.utils.google_utils import attempt_download
 from yolov7.utils.loss import ComputeLoss, ComputeLossOTA
-from yolov7.utils.plots import plot_images, plot_labels, plot_results, plot_evolution
+from yolov7.utils.plots import plot_images, plot_results, plot_evolution
 from yolov7.utils.torch_utils import ModelEMA, select_device, intersect_dicts, torch_distributed_zero_first, is_parallel
 from yolov7.utils.wandb_logging.wandb_utils import WandbLogger, check_wandb_resume
 
 logger = logging.getLogger(__name__)
+
+
+def no_decay_params(module):
+    # Parameters of implicit-knowledge, attention and re-parameterized conv layers, optimized without weight decay
+    params = []
+    for name in ('im', 'imc', 'imb', 'imo', 'ia'):
+        if hasattr(module, name):
+            implicit = getattr(module, name)
+            params.extend([implicit.implicit] if hasattr(implicit, 'implicit') else [iv.implicit for iv in implicit])
+    if hasattr(module, 'attn'):
+        for name in ('logit_scale', 'q_bias', 'v_bias', 'relative_position_bias_table'):
+            if hasattr(module.attn, name):
+                params.append(getattr(module.attn, name))
+    if hasattr(module, 'rbr_dense'):
+        for name in ('weight_rbr_origin', 'weight_rbr_avg_conv', 'weight_rbr_pfir_conv', 'weight_rbr_1x1_kxk_idconv1',
+                     'weight_rbr_1x1_kxk_conv2', 'weight_rbr_gconv_dw', 'weight_rbr_gconv_pw', 'vector'):
+            if hasattr(module.rbr_dense, name):
+                params.append(getattr(module.rbr_dense, name))
+    return params
 
 
 def train(hyp, opt, device, tb_writer=None):
@@ -60,17 +84,17 @@ def train(hyp, opt, device, tb_writer=None):
     plots = not opt.evolve  # create plots
     cuda = device.type != 'cpu'
     init_seeds(2 + rank)
-    print(f"Attempting to load {opt.data}")
+    logger.info(f'Loading dataset {opt.data}')
     with open(opt.data) as f:
         data_dict = yaml.load(f, Loader=yaml.SafeLoader)  # data dict
-    print(data_dict)
+    logger.info(data_dict)
     is_coco = opt.data.endswith('coco.yaml')
 
     # Logging- Doing this before checking the dataset. Might update data_dict
     loggers = {'wandb': None}  # loggers dict
     if rank in [-1, 0]:
         opt.hyp = hyp  # add hyperparameters
-        run_id = torch.load(weights, map_location=device).get('wandb_id') if weights.endswith('.pt') and os.path.isfile(weights) else None
+        run_id = load_checkpoint(weights, map_location=device).get('wandb_id') if weights.endswith('.pt') and os.path.isfile(weights) else None
         wandb_logger = WandbLogger(opt, Path(opt.save_dir).stem, run_id, data_dict)
         loggers['wandb'] = wandb_logger.wandb
         data_dict = wandb_logger.data_dict
@@ -86,7 +110,7 @@ def train(hyp, opt, device, tb_writer=None):
     if pretrained:
         with torch_distributed_zero_first(rank):
             attempt_download(weights)  # download if not found locally
-        ckpt = torch.load(weights, map_location=device)  # load checkpoint
+        ckpt = load_checkpoint(weights, map_location=device)  # load checkpoint
         model = Model(opt.cfg or ckpt['model'].yaml, ch=3, nc=nc, anchors=hyp.get('anchors')).to(device)  # create
         exclude = ['anchor'] if (opt.cfg or hyp.get('anchors')) and not opt.resume else []  # exclude keys
         state_dict = ckpt['model'].float().state_dict()  # to FP32
@@ -122,62 +146,7 @@ def train(hyp, opt, device, tb_writer=None):
             pg0.append(v.weight)  # no decay
         elif hasattr(v, 'weight') and isinstance(v.weight, nn.Parameter):
             pg1.append(v.weight)  # apply decay
-        if hasattr(v, 'im'):
-            if hasattr(v.im, 'implicit'):           
-                pg0.append(v.im.implicit)
-            else:
-                for iv in v.im:
-                    pg0.append(iv.implicit)
-        if hasattr(v, 'imc'):
-            if hasattr(v.imc, 'implicit'):           
-                pg0.append(v.imc.implicit)
-            else:
-                for iv in v.imc:
-                    pg0.append(iv.implicit)
-        if hasattr(v, 'imb'):
-            if hasattr(v.imb, 'implicit'):           
-                pg0.append(v.imb.implicit)
-            else:
-                for iv in v.imb:
-                    pg0.append(iv.implicit)
-        if hasattr(v, 'imo'):
-            if hasattr(v.imo, 'implicit'):           
-                pg0.append(v.imo.implicit)
-            else:
-                for iv in v.imo:
-                    pg0.append(iv.implicit)
-        if hasattr(v, 'ia'):
-            if hasattr(v.ia, 'implicit'):           
-                pg0.append(v.ia.implicit)
-            else:
-                for iv in v.ia:
-                    pg0.append(iv.implicit)
-        if hasattr(v, 'attn'):
-            if hasattr(v.attn, 'logit_scale'):   
-                pg0.append(v.attn.logit_scale)
-            if hasattr(v.attn, 'q_bias'):   
-                pg0.append(v.attn.q_bias)
-            if hasattr(v.attn, 'v_bias'):  
-                pg0.append(v.attn.v_bias)
-            if hasattr(v.attn, 'relative_position_bias_table'):  
-                pg0.append(v.attn.relative_position_bias_table)
-        if hasattr(v, 'rbr_dense'):
-            if hasattr(v.rbr_dense, 'weight_rbr_origin'):  
-                pg0.append(v.rbr_dense.weight_rbr_origin)
-            if hasattr(v.rbr_dense, 'weight_rbr_avg_conv'): 
-                pg0.append(v.rbr_dense.weight_rbr_avg_conv)
-            if hasattr(v.rbr_dense, 'weight_rbr_pfir_conv'):  
-                pg0.append(v.rbr_dense.weight_rbr_pfir_conv)
-            if hasattr(v.rbr_dense, 'weight_rbr_1x1_kxk_idconv1'): 
-                pg0.append(v.rbr_dense.weight_rbr_1x1_kxk_idconv1)
-            if hasattr(v.rbr_dense, 'weight_rbr_1x1_kxk_conv2'):   
-                pg0.append(v.rbr_dense.weight_rbr_1x1_kxk_conv2)
-            if hasattr(v.rbr_dense, 'weight_rbr_gconv_dw'):   
-                pg0.append(v.rbr_dense.weight_rbr_gconv_dw)
-            if hasattr(v.rbr_dense, 'weight_rbr_gconv_pw'):   
-                pg0.append(v.rbr_dense.weight_rbr_gconv_pw)
-            if hasattr(v.rbr_dense, 'vector'):   
-                pg0.append(v.rbr_dense.vector)
+        pg0.extend(no_decay_params(v))
 
     if opt.adam:
         optimizer = optim.Adam(pg0, lr=hyp['lr0'], betas=(hyp['momentum'], 0.999))  # adjust beta1 to momentum
@@ -262,12 +231,8 @@ def train(hyp, opt, device, tb_writer=None):
         if not opt.resume:
             labels = np.concatenate(dataset.labels, 0)
             c = torch.tensor(labels[:, 0])  # classes
-            # cf = torch.bincount(c.long(), minlength=nc) + 1.  # frequency
-            # model._initialize_biases(cf.to(device))
-            if plots:
-                #plot_labels(labels, names, save_dir, loggers)
-                if tb_writer:
-                    tb_writer.add_histogram('classes', c, 0)
+            if plots and tb_writer:
+                tb_writer.add_histogram('classes', c, 0)
 
             # Anchors
             if not opt.noautoanchor:
@@ -526,9 +491,9 @@ def train(hyp, opt, device, tb_writer=None):
     return results
 
 
-if __name__ == '__main__':
+def parse_opt(argv=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument('--weights', type=str, default='yolo7.pt', help='initial weights path')
+    parser.add_argument('--weights', type=str, default='yolov7.pt', help='initial weights path')
     parser.add_argument('--cfg', type=str, default='', help='model.yaml path')
     parser.add_argument('--data', type=str, default='data/coco.yaml', help='data.yaml path')
     parser.add_argument('--hyp', type=str, default='data/hyp.scratch.p5.yaml', help='hyperparameters path')
@@ -564,15 +529,14 @@ if __name__ == '__main__':
     parser.add_argument('--artifact_alias', type=str, default="latest", help='version of dataset artifact to be used')
     parser.add_argument('--freeze', nargs='+', type=int, default=[0], help='Freeze layers: backbone of yolov7=50, first3=0 1 2')
     parser.add_argument('--v5-metric', action='store_true', help='assume maximum recall as 1.0 in AP calculation')
-    opt = parser.parse_args()
+    return parser.parse_args(argv)
 
+
+def main(opt):
     # Set DDP variables
     opt.world_size = int(os.environ['WORLD_SIZE']) if 'WORLD_SIZE' in os.environ else 1
     opt.global_rank = int(os.environ['RANK']) if 'RANK' in os.environ else -1
     set_logging(opt.global_rank)
-    #if opt.global_rank in [-1, 0]:
-    #    check_git_status()
-    #    check_requirements()
 
     # Resume
     wandb_run = check_wandb_resume(opt)
@@ -585,7 +549,6 @@ if __name__ == '__main__':
         opt.cfg, opt.weights, opt.resume, opt.batch_size, opt.global_rank, opt.local_rank = '', ckpt, True, opt.total_batch_size, *apriori  # reinstate
         logger.info('Resuming training from %s' % ckpt)
     else:
-        # opt.hyp = opt.hyp or ('hyp.finetune.yaml' if opt.weights else 'hyp.scratch.yaml')
         opt.data, opt.cfg, opt.hyp = check_file(opt.data), check_file(opt.cfg), check_file(opt.hyp)  # check files
         assert len(opt.cfg) or len(opt.weights), 'either --cfg or --weights must be specified'
         opt.img_size.extend([opt.img_size[-1]] * (2 - len(opt.img_size)))  # extend to 2 sizes (train, test)
@@ -705,3 +668,7 @@ if __name__ == '__main__':
         plot_evolution(yaml_file)
         print(f'Hyperparameter evolution complete. Best results saved as: {yaml_file}\n'
               f'Command to train a new model with these hyperparameters: $ python train.py --hyp {yaml_file}')
+
+
+if __name__ == '__main__':
+    main(parse_opt())

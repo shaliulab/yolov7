@@ -18,6 +18,7 @@ import torch
 import torchvision
 import yaml
 
+from yolov7.utils.checkpoint import load_checkpoint
 from yolov7.utils.google_utils import gsutil_getsize
 from yolov7.utils.metrics import fitness
 from yolov7.utils.torch_utils import init_torch_seeds
@@ -28,6 +29,8 @@ np.set_printoptions(linewidth=320, formatter={'float_kind': '{:11.5g}'.format}) 
 pd.options.display.max_columns = 10
 cv2.setNumThreads(0)  # prevent OpenCV from multithreading (incompatible with PyTorch DataLoader)
 os.environ['NUMEXPR_MAX_THREADS'] = str(min(os.cpu_count(), 8))  # NumExpr max threads
+
+REPO_ROOT = Path(__file__).resolve().parents[2]  # holds cfg/ and data/
 
 
 def set_logging(rank=-1):
@@ -129,24 +132,16 @@ def check_img_size(img_size, s=32):
 
 
 def check_imshow():
-    # Check if environment supports image displays
+    # Image display is disabled: the cv2.imshow() probe crashes (rather than raising) on the VSC cluster
     return False
-    try:
-        assert not isdocker(), 'cv2.imshow() is disabled in Docker environments'
-        cv2.imshow('test', np.zeros((1, 1, 3)))
-        cv2.waitKey(1)
-        cv2.destroyAllWindows()
-        cv2.waitKey(1)
-        return True
-    except Exception as e:
-        print(f'WARNING: Environment does not support cv2.imshow() or PIL Image.show() image displays\n{e}')
-        return False
 
 
 def check_file(file):
-    # Search for file if not found
+    # Search for file if not found, first relative to the repository (cfg/..., data/...), then under the cwd
     if Path(file).is_file() or file == '':
         return file
+    elif (REPO_ROOT / file).is_file():
+        return str(REPO_ROOT / file)
     else:
         files = glob.glob('./**/' + file, recursive=True)  # find file
         assert len(files), f'File Not Found: {file}'  # assert file was found
@@ -800,7 +795,7 @@ def non_max_suppression_kpt(prediction, conf_thres=0.25, iou_thres=0.45, classes
 
 def strip_optimizer(f='best.pt', s=''):  # from yolov7.utils.general import *; strip_optimizer()
     # Strip optimizer from 'f' to finalize training, optionally save as 's'
-    x = torch.load(f, map_location=torch.device('cpu'))
+    x = load_checkpoint(f, map_location=torch.device('cpu'))
     if x.get('ema'):
         x['model'] = x['ema']  # replace model with ema
     for k in 'optimizer', 'training_results', 'wandb_id', 'ema', 'updates':  # keys

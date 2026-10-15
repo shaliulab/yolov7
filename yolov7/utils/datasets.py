@@ -11,7 +11,6 @@ from itertools import repeat
 from multiprocessing.pool import ThreadPool
 from pathlib import Path
 from threading import Thread
-import collections
 
 import cv2
 import numpy as np
@@ -20,11 +19,6 @@ import torch.nn.functional as F
 from PIL import Image, ExifTags
 from torch.utils.data import Dataset
 from tqdm import tqdm
-from imgstore.stores.utils.mixins.extract import _extract_store_metadata
-import re
-
-from flyhostel.data.hdf5 import HDF5ImagesReader
-from flyhostel.data.video.reader import MP4Reader
 
 import pickle
 from copy import deepcopy
@@ -269,244 +263,56 @@ class LoadWebcam:  # for inference
         return 0
 
 
-# class IdtrackeraiLoader:
+class LoadImageList:  # for inference on a .txt file listing image paths, in batches
+    def __init__(self, sources='input.txt', img_size=640, stride=32, batch_size=5):
+        self.mode = 'image'
+        self.img_size = img_size
+        self.stride = stride
+        self.batch_size = batch_size
+        with open(sources, 'r') as f:
+            self.files = [x.strip() for x in f.read().strip().splitlines() if len(x.strip())]
+        self.nf = len(self.files)
 
-#     _EXTENSION=".hdf5"
-
-#     def load_sources(self, metadata, chunks=None):
-
-#        pattern=os.path.join(os.path.dirname(metadata), "idtrackerai", "session_*", "segmentation_data", "episode_images*.hdf5")
-#        sources=glob.glob(pattern)
-#        sources = sorted(sources, key=lambda f: int(os.path.splitext(f)[0].split("_")[-1]))
-
-#        self.sources = []
-
-#        for source in sources:
-#            assert os.path.exists(source) and source.endswith(self._EXTENSION)
-#            if chunks:
-#                for chunk in chunks:
-#                    if re.search(f"session_{str(chunk).zfill(6)}", source):
-#                        self.sources.append(source)
-#                        break
-#            else:
-#                self.sources.append(source)
-#        print(f"{len(self.sources)} sources detected")
-
-#     @property
-#     def chunksize(self):
-#         return int(self._experiment_metadata["chunksize"])
-
-#     @property
-#     def framerate(self):
-#         return int(self._experiment_metadata["framerate"])
-
-
-# class LoadH5py(IdtrackeraiLoader):
-
-#     def __init__(self, metadata="metadata.yaml", img_size=640, stride=32, freq=1, chunks=None):
-#         self.mode="image"
-#         self.img_size=img_size
-#         self.stride=stride
-#         self.rect=False
-#         self.metadata = os.path.realpath(metadata)
-#         self._experiment_metadata = _extract_store_metadata(metadata)
-#         self._n = -1
-#         self.load_sources(self.metadata, chunks=chunks)
-#         self._next_source()
-#         self.freq=freq
-
-#     @property
-#     def sampling_rate(self):
-#         return int(self.framerate / self.freq)
-
-
-#     @property
-#     def count(self):
-#         return int(self.key.split("-")[0])
-
-#     @property
-#     def key(self):
-#         try:
-#             k=self.keys[self._key_n]
-#             logger.debug(f"Key {k}")
-#             return k
-#         except Exception as error:
-#             end = self._next_source()
-#             if end: return True
-#             else:
-#                 return None
-
-
-#     def __iter__(self):
-#         return self
-
-#     def fetch_one_image(self, file, key):
-
-#         img0 = file[key][:]
-#         return np.stack([img0, img0, img0], axis=2)
-
-
-#     def move_through_h5py(self):
-
-#         img0=[]
-#         keys=[]
-#         source=self.source
-
-#         with h5py.File(source, "r") as file:
-#             for i in range(5):
-#                 self._key_n += self.sampling_rate
-#                 key=self.key
-#                 if key is None:
-#                     return img0, keys, source
-#                 elif key is True:
-#                     raise StopIteration
-
-#                 im = self.fetch_one_image(file, key)
-#                 keys.append(key)
-#                 img0.append(im)
-
-#         if len(img0) == 0:
-#             print("Error: early end detected")
-#             raise StopIteration
-#         return img0, keys, source
-
-
-#     def __next__(self):
-
-#         img0, keys, source = self.move_through_h5py()
-
-#         # Letterbox
-#         img = [letterbox(x, self.img_size, auto=self.rect, stride=self.stride)[0] for x in img0]
-
-#         # Stack
-#         try:
-#             img = np.stack(img, 0)
-#         except:
-#             import ipdb; ipdb.set_trace()
-
-#         # Convert
-#         img = img[:, :, :, ::-1].transpose(0, 3, 1, 2)  # BGR to RGB, to bsx3x416x416
-#         img = np.ascontiguousarray(img)
-#         chunk = int(re.search("session_([0-9]{6})/segmentation_data/episode_images", source).group(1))
-
-#         paths = []
-#         for k in keys:
-#             frame_number, blob_index = k.split("-")
-#             frame_idx = int(frame_number) % (chunk * self.chunksize)
-#             paths.append(f"{frame_number}_{chunk}-{frame_idx}-{blob_index}.png")
-#         return paths, img, img0, None
-
-
-#     def _next_source(self):
-#         self._n +=1
-#         if self._n == len(self.sources):
-#             return True
-#         self.source = self.sources[self._n]
-#         print(f"<- {self.source}")
-#         with h5py.File(self.source, "r") as file:
-#             self.keys=list(file.keys())
-#         logger.debug(f"There are {len(self.keys)} keys in this file")
-#         self._key_n=0
-#         return False
-
-
-class LoadH5py_deprecated:
-
-    def __init__(self, sources="index.txt", img_size=640, stride=32):
-        self.mode="stream"
-        self.img_size=img_size
-        self.stride=stride
-        self.rect=False
-
-        with open(sources, "r") as filehandle:
-            sources = [source.strip("\n") for source in filehandle.readlines()]
-
-        self.sources = sources
-        for source in self.sources:
-            assert os.path.exists(source) and source.endswith(".hdf5")
-
-        self._n = -1
-        self._next_source()
-        self.imgs = collections.deque([], 1)
-        thread = Thread(target=self.update, daemon=True)
-        #print(f' success ({w}x{h} at {self.fps:.2f} FPS).')
-        thread.start()
-
-
-    @property
-    def key(self):
-        return self.keys[self._key_n]
+    @staticmethod
+    def is_image_list(sources):
+        with open(sources, 'r') as f:
+            files = [x.strip() for x in f.read().strip().splitlines() if len(x.strip())]
+        return all(x.split('.')[-1].lower() in img_formats for x in files)
 
     def __iter__(self):
+        self.count = -1
+        self._next_file = 0
         return self
 
-    def fetch_one_image(self, file):
-
-        img0 = file[self.key][:]
-        self._key_n +=1
-        end = False
-        if self._key_n == len(self.keys):
-            print("POINT1", self._key_n, len(self.keys))
-            end_ = self._next_source()
-        if end:
-            return True
-
-        return True, np.stack([img0, img0, img0], axis=2)
-
-
-    def update(self):
-
-        updated_file = False
-        end = False
-        while not end:
-            with h5py.File(self.source, "r") as file:
-                while not updated_file:
-                    img0 = []
-                    for _ in range(5):
-                        im = self.fetch_one_image(file)
-                        if im is True:
-                            updated_file=True
-                        else:
-                            img0.append(im)
-
-                    while len(self.imgs) == 1:
-                        time.sleep(1/10)
-                    self.imgs.append(img0)
-
-            if self._key_n == len(self.keys):
-                updated_file = self._next_source()
-
     def __next__(self):
+        paths, img0 = [], []
+        while not paths:
+            if self._next_file >= self.nf:
+                raise StopIteration
+            batch = self.files[self._next_file:self._next_file + self.batch_size]
+            self._next_file += len(batch)
+            for path in batch:
+                im = cv2.imread(path)  # BGR
+                if im is None:
+                    logger.warning(f'Image Not Found or unreadable, skipping: {path}')
+                    continue
+                paths.append(path)
+                img0.append(im)
+        self.count += 1
 
-        while len(self.imgs) == 0:
-            time.sleep(1/10)
-
-        img0 = self.imgs.pop()
-        # Letterbox
-        img = [letterbox(x, self.img_size, auto=self.rect, stride=self.stride)[0] for x in img0]
-
-        # Stack
-        img = np.stack(img, 0)
+        # Letterbox, with minimal padding (rect) only if all images in the batch end up with the same shape
+        shapes = {letterbox(x, self.img_size, stride=self.stride)[0].shape for x in img0}
+        rect = len(shapes) == 1
+        img = np.stack([letterbox(x, self.img_size, auto=rect, stride=self.stride)[0] for x in img0], 0)
 
         # Convert
-        print(img.shape)
         img = img[:, :, :, ::-1].transpose(0, 3, 1, 2)  # BGR to RGB, to bsx3x416x416
         img = np.ascontiguousarray(img)
 
-        return self.sources, [img], [img0], None
+        return paths, img, img0, None
 
-
-    def _next_source(self):
-        self._n +=1
-        if self._n == len(self.sources):
-            return True
-        self.source = self.sources[self._n]
-        print(f"Switching to {self.source}")
-        with h5py.File(self.source, "r") as file:
-            self.keys=list(file.keys())
-        print(f"There are {len(self.keys)} keys in this file")
-        self._key_n=0
-        return False
+    def __len__(self):
+        return math.ceil(self.nf / self.batch_size)
 
 
 class LoadStreams:  # multiple IP or RTSP cameras
@@ -514,9 +320,6 @@ class LoadStreams:  # multiple IP or RTSP cameras
         self.mode = 'stream'
         self.img_size = img_size
         self.stride = stride
-        self.max=5
-        self.batch_count = 0
-
 
         if os.path.isfile(sources):
             with open(sources, 'r') as f:
@@ -525,34 +328,33 @@ class LoadStreams:  # multiple IP or RTSP cameras
             sources = [sources]
 
         n = len(sources)
-        self.imgs = [None] * min(n, self.max)
+        self.imgs = [None] * n
         self.sources = [clean_str(x) for x in sources]  # clean source names for later
+        for i, s in enumerate(sources):
+            # Start the thread to read frames from the video stream
+            print(f'{i + 1}/{n}: {s}... ', end='')
+            url = eval(s) if s.isnumeric() else s
+            if 'youtube.com/' in str(url) or 'youtu.be/' in str(url):  # if source is YouTube video
+                check_requirements(('pafy', 'youtube_dl'))
+                import pafy
+                url = pafy.new(url).getbest(preftype="mp4").url
+            cap = cv2.VideoCapture(url)
+            assert cap.isOpened(), f'Failed to open {s}'
+            w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            self.fps = cap.get(cv2.CAP_PROP_FPS) % 100
 
-        self.read_sources = -1
-        self.source_indices = ()
-        if all([self.source_is_image(s) for s in self.sources]):
-            self.all_imgs = True
-        else:
-            self.all_imgs = False
-        self.mode="image"
-
-        self.load_sources(self.sources)
+            _, self.imgs[i] = cap.read()  # guarantee first frame
+            thread = Thread(target=self.update, args=([i, cap]), daemon=True)
+            print(f' success ({w}x{h} at {self.fps:.2f} FPS).')
+            thread.start()
+        print('')  # newline
 
         # check for common shapes
-        if len(self.imgs) == 0:
-            self._empty=True
-            self.rect=True
-            return
-
-
-        else:
-            self._empty=False
-            s = np.stack([letterbox(x, self.img_size, stride=self.stride)[0].shape for x in self.imgs], 0)  # shapes
-
+        s = np.stack([letterbox(x, self.img_size, stride=self.stride)[0].shape for x in self.imgs], 0)  # shapes
         self.rect = np.unique(s, axis=0).shape[0] == 1  # rect inference if all shapes equal
         if not self.rect:
             print('WARNING: Different stream shapes detected. For optimal performance supply similarly-shaped streams.')
-
 
     def update(self, index, cap):
         # Read next stream frame in a daemon thread
@@ -567,63 +369,13 @@ class LoadStreams:  # multiple IP or RTSP cameras
                 n = 0
             time.sleep(1 / self.fps)  # wait time
 
-
-    @staticmethod
-    def source_is_image(s):
-        return s.split('.')[-1].lower() in img_formats
-
-    def load_sources(self, sources):
-
-        accum = 0
-        self.imgs = [None] * min(len(sources), self.max)
-
-        self.source_indices = (self.batch_count, self.batch_count+self.max)
-
-        for i, s in enumerate(sources[self.source_indices[0]:self.source_indices[1]]):
-
-            if self.source_is_image(s):
-                self.imgs[i] = cv2.imread(s)
-
-            else:
-                n = len(sources)
-                # Start the thread to read frames from the video stream
-                print(f'{i + 1}/{n}: {s}... ', end='')
-                url = eval(s) if s.isnumeric() else s
-                if 'youtube.com/' in str(url) or 'youtu.be/' in str(url):  # if source is YouTube video
-                    check_requirements(('pafy', 'youtube_dl'))
-                    import pafy
-                    url = pafy.new(url).getbest(preftype="mp4").url
-                cap = cv2.VideoCapture(url)
-                assert cap.isOpened(), f'Failed to open {s}'
-                w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-                h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                self.fps = cap.get(cv2.CAP_PROP_FPS) % 100
-
-                _, self.imgs[i] = cap.read()  # guarantee first frame
-                thread = Thread(target=self.update, args=([i, cap]), daemon=True)
-                print(f' success ({w}x{h} at {self.fps:.2f} FPS).')
-                thread.start()
-
-            accum +=1
-
-        self.batch_count += accum
-        self.read_sources = accum
-
-        print('')  # newline
-
     def __iter__(self):
-       self.count = -1
-       return self
+        self.count = -1
+        return self
 
     def __next__(self):
-
-        if (self.all_imgs and self.read_sources == 0) or self._empty:
-            raise StopIteration
-
         self.count += 1
         img0 = self.imgs.copy()
-        img0 = [im for im in img0 if im is not None]
-
         if cv2.waitKey(1) == ord('q'):  # q to quit
             cv2.destroyAllWindows()
             raise StopIteration
@@ -635,13 +387,10 @@ class LoadStreams:  # multiple IP or RTSP cameras
         img = np.stack(img, 0)
 
         # Convert
-        print(img.shape)
         img = img[:, :, :, ::-1].transpose(0, 3, 1, 2)  # BGR to RGB, to bsx3x416x416
         img = np.ascontiguousarray(img)
-        sources=self.sources[self.source_indices[0]:self.source_indices[1]]
-        self.load_sources(self.sources)
 
-        return sources, img, img0, None
+        return self.sources, img, img0, None
 
     def __len__(self):
         return 0  # 1E12 frames = 32 streams at 30 FPS for 30 years

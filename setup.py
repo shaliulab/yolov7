@@ -17,15 +17,18 @@ setup(
     ],
     # python_requires='>=3.10.11',  # Specify your minimal Python version
     install_requires=[
-        "pillow", "torch", "torchvision",
-    #     "pandas>=1.3.5",
-    #     "plotly>=5.16.1",
-    #     "joblib>=1.3.2",
-    #     # Add more packages as needed
+        "pillow", "torch", "torchvision", "pyyaml",
     ],
+    extras_require={
+        # yolov7-data; reading FlyHostel stores in detect.py additionally needs flyhostel
+        "workflow": ["fiftyone", "cvat-sdk"],
+    },
     entry_points={
         'console_scripts': [
             'yolov7-detect=yolov7.detect:main',
+            'yolov7-data=yolov7.workflow.data:main',
+            'yolov7-train=yolov7.workflow.train:main',
+            'yolov7-models=yolov7.workflow.models:main',
         ],
     },
 

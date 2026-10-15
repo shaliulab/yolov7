@@ -1,15 +1,19 @@
 import argparse
 import json
 import os
+import sys
 from pathlib import Path
 from threading import Thread
+
+if not __package__:  # run as a script: make the yolov7 package importable
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import numpy as np
 import torch
 import yaml
 from tqdm import tqdm
 
-from models.experimental import attempt_load
+from yolov7.models.experimental import attempt_load
 from yolov7.utils.datasets import create_dataloader
 from yolov7.utils.general import coco80_to_coco91_class, check_dataset, check_file, check_img_size, check_requirements, \
     box_iou, non_max_suppression, scale_coords, xyxy2xywh, xywh2xyxy, set_logging, increment_path, colorstr

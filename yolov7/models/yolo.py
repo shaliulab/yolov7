@@ -3,7 +3,6 @@ import logging
 import sys
 from copy import deepcopy
 
-sys.path.append('./')  # to run '$ python *.py' files in subdirectories
 logger = logging.getLogger(__name__)
 import torch
 from yolov7.models.common import *

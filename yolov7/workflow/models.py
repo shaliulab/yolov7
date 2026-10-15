@@ -1,0 +1,335 @@
+"""yolov7-models: a registry of trained YOLOv7 weights
+
+Each archived model version is a self-contained directory: the stripped weights (what detect.py needs, ~75MB instead
+of the ~15GB a training run leaves behind), a model.yaml card saying what it was trained on and how well it does,
+and the training plots/configs. A `production` symlink per model says which version is in use.
+
+    <registry>/
+      README.md                          index of all models and versions (regenerated automatically)
+      flyfinder/
+        production -> 2024-02-19_240219_flyfinder
+        HISTORY.log                      archive and promote events
+        2024-02-19_240219_flyfinder/
+          weights.pt  model.yaml  train/  dataset/
+
+The registry is $YOLOV7_REGISTRY, or registry/ in the yolov7 repository.
+
+    yolov7-models archive runs/train/my_run --name flyfinder [--promote] [--notes "..."]
+    yolov7-models list [flyfinder]
+    yolov7-models show flyfinder[:VERSION]
+    yolov7-models promote flyfinder VERSION
+    yolov7-models path flyfinder[:VERSION]      # e.g. detect.py --weights $(yolov7-models path flyfinder)
+"""
+
+import argparse
+import datetime
+import os
+import re
+import shutil
+import socket
+import sys
+from pathlib import Path
+
+import yaml
+
+from yolov7.workflow.common import REPO_ROOT, env_path, git_commit, now, print_table, read_json, sha256
+
+PRODUCTION = 'production'
+WEIGHTS = 'weights.pt'
+CARD = 'model.yaml'
+# Small training outputs worth keeping next to the weights
+TRAIN_FILES = ('opt.yaml', 'hyp.yaml', 'results.txt', 'results.png', 'confusion_matrix.png', 'F1_curve.png',
+               'P_curve.png', 'R_curve.png', 'PR_curve.png', 'test_batch0_labels.jpg', 'test_batch0_pred.jpg')
+
+
+def registry_root(args):
+    return Path(args.registry).expanduser() if args.registry else env_path('YOLOV7_REGISTRY', REPO_ROOT / 'registry')
+
+
+def read_card(version_dir):
+    with open(version_dir / CARD) as f:
+        return yaml.safe_load(f)
+
+
+def versions(model_dir):
+    found = [p for p in model_dir.iterdir() if p.is_dir() and not p.is_symlink() and (p / CARD).is_file()]
+    return sorted(found, key=lambda p: (str(read_card(p).get('trained')), p.name))
+
+
+def training_date(run_dir, weights):
+    # Start of training from the TensorBoard file name (events.out.tfevents.<unix time>.<host>...): unlike file
+    # modification times, it survives copying runs around
+    for f in sorted(run_dir.glob('events.out.tfevents.*')):
+        stamp = f.name.split('.')[3]
+        if stamp.isdigit():
+            return datetime.date.fromtimestamp(int(stamp)).isoformat()
+    return datetime.date.fromtimestamp(weights.stat().st_mtime).isoformat()
+
+
+def production_version(model_dir):
+    link = model_dir / PRODUCTION
+    return os.readlink(link) if link.is_symlink() else None
+
+
+def parse_ref(root, ref):
+    # 'name' -> production (or latest if none is promoted), 'name:version' -> that version
+    name, _, version = ref.partition(':')
+    model_dir = root / name
+    if not model_dir.is_dir():
+        known = ', '.join(p.name for p in root.iterdir() if p.is_dir()) if root.is_dir() else ''
+        raise SystemExit(f"No model '{name}' in {root}" + (f' (known: {known})' if known else ''))
+    if not version:
+        version = production_version(model_dir) or (versions(model_dir)[-1].name if versions(model_dir) else None)
+    if not version or not (model_dir / version / CARD).is_file():
+        raise SystemExit(f"No version '{version}' of '{name}'. See: yolov7-models list {name}")
+    return model_dir, model_dir / version
+
+
+def best_epoch_metrics(results_txt):
+    # results.txt rows: epoch gpu_mem box obj cls total labels img_size P R mAP@.5 mAP@.5:.95 val_box val_obj val_cls
+    best, epochs = None, 0
+    for line in Path(results_txt).read_text().splitlines():
+        cols = line.split()
+        if len(cols) < 15:
+            continue
+        epochs += 1
+        p, r, map50, map5095 = (float(x) for x in cols[8:12])
+        fitness = 0.1 * map50 + 0.9 * map5095  # same weighting train.py uses to pick best.pt
+        if best is None or fitness > best[0]:
+            best = (fitness, int(cols[0].split('/')[0]), p, r, map50, map5095)
+    if best is None:
+        return {}
+    return {'best_epoch': best[1], 'epochs_trained': epochs, 'precision': round(best[2], 4),
+            'recall': round(best[3], 4), 'mAP_0.5': round(best[4], 4), 'mAP_0.5:0.95': round(best[5], 4)}
+
+
+def log_event(model_dir, message):
+    with open(model_dir / 'HISTORY.log', 'a') as f:
+        f.write(f'{now()}  {message}\n')
+
+
+def set_production(model_dir, version):
+    tmp = model_dir / f'.{PRODUCTION}.tmp'
+    if tmp.is_symlink():
+        tmp.unlink()
+    tmp.symlink_to(version)  # relative, so the registry can be moved or synced elsewhere
+    os.replace(tmp, model_dir / PRODUCTION)
+
+
+def dataset_label(info):
+    return info.get('name') or Path(info.get('yaml', '')).parent.name
+
+
+def write_index(root):
+    lines = ['# YOLOv7 model registry', '', f'Generated by `yolov7-models` on {now()}. Do not edit by hand.', '']
+    for model_dir in sorted(p for p in root.iterdir() if p.is_dir()):
+        prod = production_version(model_dir)
+        lines += [f'## {model_dir.name}', '',
+                  f'Production: `{prod}` → `{model_dir / PRODUCTION / WEIGHTS}`' if prod else 'Production: none', '',
+                  '| version | trained | dataset | images (train/val) | mAP@.5 | mAP@.5:.95 | notes |',
+                  '|---|---|---|---|---|---|---|']
+        for v in reversed(versions(model_dir)):
+            c = read_card(v)
+            m, d = c.get('metrics', {}), c.get('dataset', {})
+            n = d.get('images', {})
+            images = f"{n.get('train')}/{n.get('val')}" if n else ''
+            lines.append(f"| {'**' + v.name + '**' if v.name == prod else v.name} | {c.get('trained', '')} | "
+                         f"{dataset_label(d)} | {images} | "
+                         f"{m.get('mAP_0.5', '')} | {m.get('mAP_0.5:0.95', '')} | {c.get('notes') or ''} |")
+        lines.append('')
+    (root / 'README.md').write_text('\n'.join(lines))
+
+
+def dataset_info(data_yaml, version_dir):
+    # Copy the dataset definition (and yolov7-data manifest, if any) so the card stays meaningful if it moves
+    info = {'yaml': str(data_yaml)}
+    data_yaml = Path(data_yaml)
+    if not data_yaml.is_file():
+        info['missing'] = True
+        return info
+    (version_dir / 'dataset').mkdir()
+    shutil.copy2(data_yaml, version_dir / 'dataset' / 'dataset.yaml')
+    with open(data_yaml) as f:
+        names = yaml.safe_load(f).get('names')
+    info['classes'] = list(names.values()) if isinstance(names, dict) else names
+    manifest = data_yaml.parent / 'manifest.json'
+    if manifest.is_file():
+        shutil.copy2(manifest, version_dir / 'dataset' / 'manifest.json')
+        m = read_json(manifest)
+        info['name'] = f"{m.get('fiftyone_dataset')}/{m.get('version')}"
+        info['images'] = {split: s.get('images') for split, s in m.get('splits', {}).items()}
+    return info
+
+
+def cmd_archive(args):
+    from yolov7.utils.checkpoint import load_checkpoint
+    from yolov7.utils.general import strip_optimizer
+
+    run_dir = Path(args.run).expanduser().absolute()
+    weights = Path(args.weights).expanduser().absolute() if args.weights else run_dir / 'weights' / 'best.pt'
+    if not weights.is_file():
+        raise SystemExit(f'Weights not found: {weights}')
+    if not re.fullmatch(r'[A-Za-z0-9_.-]+', args.name):
+        raise SystemExit('--name may only contain letters, digits, _ . -')
+    opt = yaml.safe_load((run_dir / 'opt.yaml').read_text()) if (run_dir / 'opt.yaml').is_file() else {}
+
+    trained = training_date(run_dir, weights)
+    has_date = re.search(r'\d{4}-\d{2}-\d{2}', run_dir.name)
+    version = args.version or (run_dir.name if has_date else f'{trained}_{run_dir.name}')
+    root = registry_root(args)
+    model_dir = root / args.name
+    version_dir = model_dir / version
+    if version_dir.exists():
+        raise SystemExit(f'{version_dir} already exists; pass --version to archive under another name')
+
+    ckpt = load_checkpoint(weights, map_location='cpu')
+    model = ckpt.get('ema') or ckpt['model']
+    names = model.names
+    epoch = ckpt.get('epoch', -1)
+    del ckpt, model
+
+    version_dir.mkdir(parents=True)
+    try:
+        # Stripped (no optimizer/EMA, FP16) and re-pickled with the current module paths
+        strip_optimizer(str(weights), str(version_dir / WEIGHTS))
+        (version_dir / 'train').mkdir()
+        for name in TRAIN_FILES:
+            if (run_dir / name).is_file():
+                shutil.copy2(run_dir / name, version_dir / 'train' / name)
+        metrics = best_epoch_metrics(run_dir / 'results.txt') if (run_dir / 'results.txt').is_file() else {}
+        if epoch >= 0 and weights.name != 'best.pt':
+            metrics['checkpoint_epoch'] = epoch
+
+        card = {
+            'name': args.name,
+            'version': version,
+            'trained': trained,
+            'archived': now(),
+            'notes': args.notes,
+            'weights': WEIGHTS,
+            'sha256': sha256(version_dir / WEIGHTS),
+            'classes': list(names.values()) if isinstance(names, dict) else list(names),
+            'img_size': (opt.get('img_size') or [640])[0],
+            'metrics': metrics,
+            'dataset': dataset_info(opt['data'], version_dir) if opt.get('data') else {},
+            'training': {k: opt.get(k) for k in ('weights', 'cfg', 'hyp', 'epochs', 'batch_size', 'freeze')
+                         if k in opt},
+            'source': {'run_dir': str(run_dir), 'weights': str(weights), 'host': socket.gethostname()},
+            'yolov7_commit': git_commit(),
+        }
+        with open(version_dir / CARD, 'w') as f:
+            yaml.safe_dump(card, f, sort_keys=False, allow_unicode=True)
+    except BaseException:
+        shutil.rmtree(version_dir)
+        raise
+
+    log_event(model_dir, f'archived {version} from {weights}')
+    previous = production_version(model_dir)
+    promote = args.promote
+    if promote is None and previous is None:  # first version of a model
+        print(f'No production version of {args.name} yet: promoting {version}')
+        promote = True
+    if promote:
+        set_production(model_dir, version)
+        log_event(model_dir, f'promoted {version} to production (was {previous})')
+    write_index(root)
+
+    print(f'\nArchived {weights} -> {version_dir / WEIGHTS}')
+    print(f"mAP@.5 {metrics.get('mAP_0.5')}  mAP@.5:.95 {metrics.get('mAP_0.5:0.95')}  (best epoch "
+          f"{metrics.get('best_epoch')} of {metrics.get('epochs_trained')})")
+    print(f'Production: {production_version(model_dir)}')
+    large = sum(f.stat().st_size for f in (run_dir / 'weights').glob('*.pt')) if (run_dir / 'weights').is_dir() else 0
+    if large > 2e9:
+        print(f'\nThe run still holds {large / 1e9:.1f}GB of intermediate checkpoints in {run_dir / "weights"}; '
+              f'they are not needed by the archived model.')
+
+
+def cmd_list(args):
+    root = registry_root(args)
+    if not root.is_dir():
+        raise SystemExit(f'Registry {root} is empty. Archive a model with: yolov7-models archive RUN_DIR --name NAME')
+    model_dirs = [root / args.model] if args.model else sorted(p for p in root.iterdir() if p.is_dir())
+    rows = []
+    for model_dir in model_dirs:
+        if not model_dir.is_dir():
+            raise SystemExit(f"No model '{model_dir.name}' in {root}")
+        prod = production_version(model_dir)
+        for v in reversed(versions(model_dir)):
+            c = read_card(v)
+            m, d = c.get('metrics', {}), c.get('dataset', {})
+            rows.append(['*' if v.name == prod else '', model_dir.name, v.name, c.get('trained'),
+                         dataset_label(d), m.get('mAP_0.5'),
+                         m.get('mAP_0.5:0.95'), (c.get('notes') or '')[:40]])
+    print(f'Registry: {root}\n')
+    print_table(rows, ['prod', 'model', 'version', 'trained', 'dataset', 'mAP@.5', 'mAP@.5:.95', 'notes'])
+
+
+def cmd_show(args):
+    _, version_dir = parse_ref(registry_root(args), args.ref)
+    print(f'# {version_dir}\n')
+    print((version_dir / CARD).read_text())
+
+
+def cmd_promote(args):
+    root = registry_root(args)
+    model_dir, version_dir = parse_ref(root, f'{args.model}:{args.version}')
+    previous = production_version(model_dir)
+    set_production(model_dir, version_dir.name)
+    log_event(model_dir, f'promoted {version_dir.name} to production (was {previous})')
+    write_index(root)
+    print(f'{args.model}: production {previous} -> {version_dir.name}\n{model_dir / PRODUCTION / WEIGHTS}')
+
+
+def cmd_path(args):
+    model_dir, version_dir = parse_ref(registry_root(args), args.ref)
+    if args.follow and ':' not in args.ref and production_version(model_dir):
+        version_dir = model_dir / PRODUCTION
+    print(version_dir / WEIGHTS)
+
+
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(prog='yolov7-models', description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('--registry', help='registry directory (default: $YOLOV7_REGISTRY or <repo>/registry)')
+    sub = parser.add_subparsers(dest='command', required=True)
+
+    p = sub.add_parser('archive', help='archive the weights of a training run as a new model version')
+    p.add_argument('run', help='training run directory, e.g. runs/train/flyfinder2.0')
+    p.add_argument('--name', required=True, help='model name, e.g. flyfinder')
+    p.add_argument('--version', help='version name (default: <date trained>_<run name>, or the run name if it contains a date)')
+    p.add_argument('--weights', help='checkpoint to archive (default: <run>/weights/best.pt)')
+    p.add_argument('--notes', help='free text stored in the model card')
+    g = p.add_mutually_exclusive_group()
+    g.add_argument('--promote', action='store_true', default=None, help='also make this version the production one')
+    g.add_argument('--no-promote', dest='promote', action='store_false',
+                   help='do not promote, even if the model has no production version yet')
+    p.set_defaults(func=cmd_archive)
+
+    p = sub.add_parser('list', help='list models and versions')
+    p.add_argument('model', nargs='?')
+    p.set_defaults(func=cmd_list)
+
+    p = sub.add_parser('show', help='print the model card of a version')
+    p.add_argument('ref', help='NAME (production) or NAME:VERSION')
+    p.set_defaults(func=cmd_show)
+
+    p = sub.add_parser('promote', help='make a version the production one')
+    p.add_argument('model')
+    p.add_argument('version')
+    p.set_defaults(func=cmd_promote)
+
+    p = sub.add_parser('path', help='print the path to the weights of a version')
+    p.add_argument('ref', help='NAME (production) or NAME:VERSION')
+    p.add_argument('--follow', action='store_true',
+                   help='print the path through the production symlink, which follows future promotions')
+    p.set_defaults(func=cmd_path)
+    return parser.parse_args(argv)
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    args.func(args)
+
+
+if __name__ == '__main__':
+    sys.exit(main())
