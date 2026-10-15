@@ -1,0 +1,3 @@
+[submodule "FlyFinder"]
+	path = FlyFinder
+	url = git@github.com:shaliulab/FlyFinder

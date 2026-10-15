@@ -1,5 +1,6 @@
 # Google utils: https://cloud.google.com/storage/docs/reference/libraries
 
+import logging
 import os
 import platform
 import subprocess
@@ -9,6 +10,7 @@ from pathlib import Path
 import requests
 import torch
 
+logger=logging.getLogger(__name__)
 
 def gsutil_getsize(url=''):
     # gs://bucket/file size https://cloud.google.com/storage/docs/gsutil/commands/du
@@ -21,6 +23,7 @@ def attempt_download(file, repo='WongKinYiu/yolov7'):
     file = Path(str(file).strip().replace("'", '').lower())
 
     if not file.exists():
+        logger.warning("%s not found", file)
         try:
             response = requests.get(f'https://api.github.com/repos/{repo}/releases/latest').json()  # github api
             assets = [x['name'] for x in response['assets']]  # release assets
