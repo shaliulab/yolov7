@@ -1,4 +1,4 @@
-# Training workflow: CVAT → dataset → model → registry
+# Training workflow: CVAT → dataset → model → registry → CVAT
 
 Three commands, installed with the package (`pip install -e .` in the `yolov7` conda env). Each has `--help`.
 
@@ -60,6 +60,50 @@ registry/
 
 A version is self-contained, so once a run is archived its `weights/` directory (often >10GB of intermediate
 checkpoints) is no longer needed by anything.
+
+## 4. Pre-populate CVAT identity tasks with detections
+
+```bash
+yolov7-cvat predict 2366 2367 --dry-run       # detect and link, write logs/cvat/task_<id>_dry-run.json, upload nothing
+yolov7-cvat predict 2366 2367                 # flyfinder3.0 (pinned, not production), conf 0.5; --model to change
+yolov7-cvat predict --project FlyHostel3_2X_2026-10-06_13-00-00
+```
+
+Every detected fly becomes a CVAT track labelled `UNASSIGNED` (added to the project if missing), with a box on every frame.
+Detections that clearly belong to the same fly in consecutive frames of a clip share one track, so in CVAT:
+
+- give one box of a track an identity (1, 2, ...) and the whole track gets it;
+- a track ends where linking is ambiguous (flies touching, a fly jumping, appearing or disappearing): give the next
+  track the same identity; if a track ever follows the wrong fly, Split it (Alt+M) at the swap;
+- leave anything you do not want as `UNASSIGNED`: flyhostel ignores that label when it reads the annotations
+  (`UNASSIGNED_LABEL` in `flyhostel/data/human_validation/cvat/cvat_integration.py`).
+
+Detection runs on the raw video frames (CVAT frames are 1000x1000 copies with overlays) when they are on disk and
+show the flies where the CVAT frame does, otherwise on the CVAT frame; blank separator frames are skipped. Tasks
+that already have annotations are skipped unless `--append`. Needs `$CVAT_USERNAME` / `$CVAT_PASSWORD`.
+
+### Give the tracks their identities
+
+```bash
+yolov7-cvat predict --assign --experiment FlyHostel1_3X_2026-09-22_14-00-00   # predict, then assign
+yolov7-cvat assign 2370 --dry-run          # on a task already pre-populated: report only (logs/cvat/task_<id>_assign_dry-run.csv)
+yolov7-cvat assign 2370
+```
+
+`--experiment` takes the tasks named after the experiment (as `upload_to_cvat.sh` names them) and those in a project
+named after it. `assign` does what a validator does, clip by clip and chunk by chunk, from the experiment's `.db`
+(fragments and local identities of idtrackerai): a track gets an identity (source `semi-auto`) where idtrackerai has
+the fly missing or wrong and the fragment was not already labelled earlier in the chunk; a fly the predictions missed
+gets a box when idtrackerai or a lower-confidence detection has it. Everything a person still has to do is a CVAT
+issue on its frame (Issues in the job's side panel), and a row of `logs/cvat/task_<id>_assign.csv`:
+
+- *check the label / the box added*: medium-confidence changes;
+- *label frames ... (best guess N)*: unclear cases, left `UNASSIGNED`;
+- *add box for fly N*: nothing found for a fly, usually a take-off or jump where the fly is a motion-blur streak.
+
+It only runs on untouched pre-populated tasks (every track `UNASSIGNED` and `auto`), and saves the annotations to
+`logs/cvat/task_<id>_assign_<time>_backup.json` first. Single-fly experiments are skipped. In the validation pipeline,
+`vsc-scripts/manual/validation/prepopulate_cvat.sh <experiment>` runs it after `upload_to_cvat.sh`.
 
 ## Checkpoint compatibility
 

@@ -29,6 +29,7 @@ setup(
             'yolov7-data=yolov7.workflow.data:main',
             'yolov7-train=yolov7.workflow.train:main',
             'yolov7-models=yolov7.workflow.models:main',
+            'yolov7-cvat=yolov7.workflow.cvat:main',
         ],
     },
 
