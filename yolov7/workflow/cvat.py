@@ -48,6 +48,9 @@ MARGIN = 0.2
 DEFAULT_MODEL = 'flyfinder:2026-10-15_flyfinder3.0'
 BLANK_STD = 2  # separator frames are uniform
 MAX_SHIFT = 0.5  # raw-frame detections must be this close (in box diagonals) to the CVAT-frame detections
+# How imgstore made the non square raw frames square when it wrote the clips shown in CVAT (its SQUARE_METHOD):
+# "crop" drops the end of the longest side, "pad" adds black to the bottom / right. Both keep the top left corner
+FLYHOSTEL_SQUARE_METHOD = os.environ.get('FLYHOSTEL_SQUARE_METHOD', 'crop')
 
 
 def connect(server):
@@ -139,8 +142,20 @@ class RawVideo:
                 self.cap[1].set(cv2.CAP_PROP_POS_FRAMES, idx)
             ok, frame = self.cap[1].read()
             pos = idx + 1
-            out.append(frame if ok else None)
+            out.append(ensure_square(frame) if ok else None)
         return out
+
+
+def ensure_square(frame, method=FLYHOSTEL_SQUARE_METHOD):
+    """The raw frame as imgstore shows it in the CVAT clips, so one scale maps it to the (square) CVAT frame"""
+    h, w = frame.shape[:2]
+    if h == w:
+        return frame
+    if method == 'pad':
+        side = max(h, w)
+        return np.pad(frame, [(0, side - h), (0, side - w)] + [(0, 0)] * (frame.ndim - 2))
+    side = min(h, w)
+    return frame[:side, :side]
 
 
 def experiment_dir(task_name, videos):
