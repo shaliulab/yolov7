@@ -293,6 +293,9 @@ def plan(tracks, names, blank, machine, nfly, filler=None, validated=None, break
     chunksize = machine.chunksize
     clips = C.clips_of(names, chunksize, breaks)
     fn_of = {i: fn for cl in clips for i, fn in cl}
+    # frames without a raw frame number (e.g. a scene of frame -1) cannot be matched to idtrackerai: left to a person
+    tracks = {t: [(i, b) for i, b in tr if fn_of[i] is not None] for t, tr in tracks.items()}
+    tracks = {t: tr for t, tr in tracks.items() if tr}
     segs = segments(tracks, fn_of, chunksize, breaks)
     clip_of = {i: k for k, cl in enumerate(clips) for i, _ in cl}
     by_clip = collections.defaultdict(list)
@@ -301,6 +304,12 @@ def plan(tracks, names, blank, machine, nfly, filler=None, validated=None, break
     parts = collections.Counter(s['track'] for s in segs)
     validated = dict(validated or {})
     rows = []
+    for k, cl in enumerate(clips):
+        cl = [i for i, fn in cl if fn is None and not blank[i]]
+        if cl:
+            rows.append(dict(clip=k, chunk=None, frames=f'{cl[0]}-{cl[-1]}', raw='', action='none', confidence='low',
+                             first=cl[0], last=cl[-1], reason='no raw frame number in the image name',
+                             needed=f'review {fmt(cl)}'))
     for k in sorted(by_clip):
         ss = by_clip[k]
         cl = [(i, fn) for i, fn in clips[k] if not blank[i]]
