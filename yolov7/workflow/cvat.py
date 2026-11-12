@@ -14,6 +14,7 @@ between clips are skipped.
     yolov7-cvat predict --project FlyHostel3_2X_2026-10-06_13-00-00
     yolov7-cvat predict --assign --experiment FlyHostel1_3X_2026-09-22_14-00-00  # + identities (yolov7-cvat assign)
     yolov7-cvat complete 2547 --job 7700                # then settle what assign left to a person, where a rule can
+    yolov7-cvat propose --experiment FlyHostel3_12X_2026-11-10_17-00-00  # the same, for the validator's Annotate tab
 
 Credentials come from $CVAT_USERNAME / $CVAT_PASSWORD, the server from $CVAT_SERVER (default http://localhost:8080).
 Tasks that already have annotations are skipped unless --append is passed. --assign then gives the tracks their
@@ -496,6 +497,12 @@ def parse_args(argv=None):
 
 
 def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ['propose']:
+        # no CVAT involved: proposals for idtrackerai-validator's Annotate tab
+        from yolov7.workflow import propose
+        propose.main(argv[1:])
+        return 0
     args = parse_args(argv)
     args.func(args)
 

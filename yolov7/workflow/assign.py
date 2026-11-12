@@ -382,7 +382,7 @@ class Filler:
 
 
 def plan(tracks, names, blank, machine, nfly, filler=None, validated=None, breaks=(), apply='medium', fixed=None,
-         extra_boxes=False, carry=None):
+         extra_boxes=False, carry=None, assignment=None, on_clip=None):
     """Decisions for the tracks {track id: [(cvat frame, box)]} of a task -> rows (dicts)
 
     action: 'label track' (track, first, last = the per-chunk part, identity), 'add box' (first, identity, box) or
@@ -395,6 +395,9 @@ def plan(tracks, names, blank, machine, nfly, filler=None, validated=None, break
     carry: {chunk: [(raw frame, {local identity: (identity, share)})]}, what idtrackerai's local identities were found to
     be at the end of earlier clips (CarryState). Each clip reads it at its first frame and adds its own end; updated in
     place.
+    assignment: a dict filled with every segment's decision {(track, first cvat frame): (identity, margin, confidence)},
+    including those idtrackerai already has right (yolov7-cvat propose).
+    on_clip(done, total): called after each clip.
     """
     fixed = fixed or {}
     chunksize = machine.chunksize
@@ -418,7 +421,9 @@ def plan(tracks, names, blank, machine, nfly, filler=None, validated=None, break
             rows.append(dict(clip=k, chunk=None, frames=f'{cl[0]}-{cl[-1]}', raw='', action='none', confidence='low',
                              first=cl[0], last=cl[-1], reason='no raw frame number in the image name',
                              needed=f'review {fmt(cl)}'))
-    for k in sorted(by_clip):
+    for n_done, k in enumerate(sorted(by_clip)):
+        if on_clip is not None:
+            on_clip(n_done, len(by_clip))
         ss = by_clip[k]
         cl = [(i, fn) for i, fn in clips[k] if not blank[i]]
         chunk = cl[0][1] // chunksize
@@ -438,6 +443,10 @@ def plan(tracks, names, blank, machine, nfly, filler=None, validated=None, break
             continue
         out, _, margin_of = res
         ident = [o[0] for o in out]
+        if assignment is not None:
+            for n, (s, (idn, margin)) in enumerate(zip(ss, out)):
+                conf = 'fixed' if s['track'] in fixed else 'high' if n in anchor else confidence(margin)
+                assignment[(s['track'], s['boxes'][0][0])] = (idn, float(margin), conf)
         update_carry(carry, chunk, cl[-1][1], ss, out, anchor, fixed, carried, nfly)
         # fragments given to more than one fly in this clip: every part needs its own label
         frag_ids = collections.defaultdict(set)
