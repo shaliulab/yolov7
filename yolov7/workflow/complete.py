@@ -195,8 +195,12 @@ def complete_task(client, task, detector, args):
         return dict(summary, skipped=f'raw frame {first} not found in {exp_dir}')
     scale = raw.shape[1] / frames[0].shape[1]
     machine = A.Machine(db, [fn for cl in clips for _, fn in cl if fn is not None], chunksize, scale)
+    state = A.CarryState(args.log_dir, C.EXP_RE.search(task.name).group(0) + ('_dry-run' if args.dry_run else ''))
+    carry = state.load()
     rows = A.plan(tracks, names, blank, machine, nfly, A.Filler(detector, video, scale), breaks=breaks,
-                  apply='medium', fixed=fixed, extra_boxes=True)
+                  apply='medium', fixed=fixed, extra_boxes=True, carry=carry)
+    if not args.job:
+        state.save(carry)
     job_of = lambda i: next(j for a, b, j in jobs if a <= i <= b)
     for r in rows:
         r['job'] = job_of(r['first'])

@@ -64,6 +64,11 @@ DUPLICATE_INSIDE = 0.9  # a box that is not a fly, has no blob and lies this muc
 EXTRA_INSIDE = 0.5  # an extra box at least this much inside a box of fly m can be labelled m (yolov7-cvat complete)
 SPLIT_RATIO = 1.25  # a box this many times longer than the fly's usual box holds two flies (they overlap, so not 2x)
 MERGE_GAP = 8  # frames: a fly seen this close before and after a merged box is where its interpolated box says
+# Carry-over: an identity mistake of idtrackerai (its local identity a is really fly b) lasts until it makes another one,
+# and the frames between clips passed QC, so what a clip decided about idtrackerai's local identities is how the next
+# clips of the chunk read them. The share of idtrackerai's evidence moved to the carried identity, by how sure the
+# decision behind it was (a person's label: fully)
+CARRY_SHARE = {'high': 1.0, 'medium': 0.7, 'low': 0.4, 'fixed': 1.0}
 
 
 def fragment_weight(length):
@@ -123,10 +128,12 @@ def segments(tracks, fn_of, chunksize, breaks=()):
     return out
 
 
-def solve_clip(segs, machine, validated, nfly, anchor=None, fixed=None):
+def solve_clip(segs, machine, validated, nfly, anchor=None, fixed=None, carry=None):
     """Assign identities 1..nfly to the segments of one clip-chunk
 
     validated: {(chunk, fragment): identity} decided before this clip. fixed: {track id: identity} labelled by a person.
+    carry: {idtrackerai local identity: (identity, share)} decided by earlier clips of the chunk: that share of
+    idtrackerai's evidence for a local identity goes to the identity it was found to be.
     Returns ([(identity, margin)] per segment, whether idtrackerai had no identity at all here, a function giving the
     margin of any set of forbidden (segment, identity index) pairs) or None if the clip is too complex. Identity 0 =
     not a fly.
@@ -155,7 +162,11 @@ def solve_clip(segs, machine, validated, nfly, anchor=None, fixed=None):
                 E[k, validated[key] - 1] += VALIDATED_WEIGHT
             elif 0 < blob.lid <= nfly:
                 w = fragment_weight(machine.length.get(key, 1))
-                E[k, int(blob.lid) - 1] += ANCHOR_WEIGHT * w if i == first else LATE_WEIGHT * w
+                gain = ANCHOR_WEIGHT * w if i == first else LATE_WEIGHT * w
+                lid = int(blob.lid)
+                target, share = (carry or {}).get(lid, (lid, 0.0))
+                E[k, target - 1] += gain * share
+                E[k, lid - 1] += gain * (1 - share)
     for k, s in enumerate(segs):
         if s['track'] in (fixed or {}):
             E[k, fixed[s['track']] - 1] += FIXED_WEIGHT
@@ -260,6 +271,78 @@ def confidence(margin):
     return 'high' if margin >= HIGH else 'medium' if margin >= MEDIUM else 'low'
 
 
+def carry_at(carry, chunk, fn):
+    """({local identity: (identity, share)}, raw frame it was found at) of the last clip end before raw frame fn in
+    this chunk, ({}, None) if none"""
+    before = [(f, m) for f, m in carry.get(chunk, []) if fn is None or f < fn]
+    if not before:
+        return {}, None
+    f, m = max(before, key=lambda x: x[0])
+    return dict(m), f
+
+
+def update_carry(carry, chunk, end_fn, ss, out, anchor, fixed, carried, nfly):
+    """Add to carry what idtrackerai's local identities are at the end of this clip (raw frame end_fn)
+
+    Each local identity gets the identity of the last segment that held its blob in the clip, with the share of the
+    decision's confidence; local identities not seen keep what was carried into the clip. The result is made a
+    permutation (two local identities can not be one fly): the surer entry wins, the others take the identities left,
+    their own first.
+    """
+    if end_fn is None:
+        return
+    seen = {}  # lid -> (cvat frame, identity, share)
+    for n, (s, (idn, margin)) in enumerate(zip(ss, out)):
+        if idn == 0:
+            continue
+        share = CARRY_SHARE['fixed' if s['track'] in (fixed or {}) else 'high' if n in anchor else confidence(margin)]
+        for (i, _, _), blob in zip(s['boxes'], s['blobs']):
+            if blob is None or not 0 < blob.lid <= nfly:
+                continue
+            lid = int(blob.lid)
+            if lid not in seen or i >= seen[lid][0]:
+                seen[lid] = (i, idn, share)
+    entries = {lid: (idn, share) for lid, (_, idn, share) in seen.items()}
+    for lid, v in carried.items():
+        entries.setdefault(lid, v)
+    mapping, taken = {}, set()
+    for lid, (idn, share) in sorted(entries.items(), key=lambda x: -x[1][1]):
+        if idn not in taken:
+            mapping[lid] = (idn, share)
+            taken.add(idn)
+    free = [v for v in range(1, nfly + 1) if v not in taken]
+    for lid in range(1, nfly + 1):
+        if lid in mapping:
+            continue
+        v = lid if lid in free else free[0]
+        free.remove(v)
+        mapping[lid] = (v, entries.get(lid, (v, 0.0))[1] if v == entries.get(lid, (None,))[0] else 0.5)
+    lst = [x for x in carry.setdefault(chunk, []) if x[0] != end_fn]
+    lst.append((end_fn, {lid: (v, sh) for lid, (v, sh) in mapping.items() if v != lid}))
+    carry[chunk] = sorted(lst, key=lambda x: x[0])
+
+
+class CarryState:
+    """The carry of an experiment kept across tasks and runs: <log dir>/<experiment>_carry.json"""
+
+    def __init__(self, log_dir, experiment):
+        self.path = Path(log_dir) / f'{experiment}_carry.json'
+
+    def load(self):
+        try:
+            data = json.loads(self.path.read_text())
+        except (OSError, ValueError):
+            return {}
+        return {int(c): [(int(f), {int(l): (int(v), float(sh)) for l, (v, sh) in m.items()}) for f, m in lst]
+                for c, lst in data.items()}
+
+    def save(self, carry):
+        data = {str(c): [[f, {str(l): [v, sh] for l, (v, sh) in m.items()}] for f, m in lst] for c, lst in carry.items()}
+        tmp = self.path.with_suffix('.tmp')
+        tmp.write_text(json.dumps(data))
+        tmp.replace(self.path)
+
+
 def applies(conf, apply):
     """Whether a decision of confidence conf is applied, when decisions are applied from confidence apply on"""
     return RANK[conf] >= RANK[apply]
@@ -299,7 +382,7 @@ class Filler:
 
 
 def plan(tracks, names, blank, machine, nfly, filler=None, validated=None, breaks=(), apply='medium', fixed=None,
-         extra_boxes=False):
+         extra_boxes=False, carry=None):
     """Decisions for the tracks {track id: [(cvat frame, box)]} of a task -> rows (dicts)
 
     action: 'label track' (track, first, last = the per-chunk part, identity), 'add box' (first, identity, box) or
@@ -309,6 +392,9 @@ def plan(tracks, names, blank, machine, nfly, filler=None, validated=None, break
     never changed (where the plan cannot agree with one, it is an issue).
     extra_boxes: label an extra box on a fly (a duplicate, or a part of the fly) with that fly's identity when the clip
     is clearly worse without the fly there (yolov7-cvat complete), instead of leaving it to a person.
+    carry: {chunk: [(raw frame, {local identity: (identity, share)})]}, what idtrackerai's local identities were found to
+    be at the end of earlier clips (CarryState). Each clip reads it at its first frame and adds its own end; updated in
+    place.
     """
     fixed = fixed or {}
     chunksize = machine.chunksize
@@ -324,6 +410,7 @@ def plan(tracks, names, blank, machine, nfly, filler=None, validated=None, break
         by_clip[clip_of[s['boxes'][0][0]]].append(s)
     parts = collections.Counter(s['track'] for s in segs)
     validated = dict(validated or {})
+    carry = carry if carry is not None else {}
     rows = []
     for k, cl in enumerate(clips):
         cl = [i for i, fn in cl if fn is None and not blank[i]]
@@ -338,18 +425,20 @@ def plan(tracks, names, blank, machine, nfly, filler=None, validated=None, break
         where = dict(clip=k, chunk=chunk, frames=f'{cl[0][0]}-{cl[-1][0]}', raw=f'{cl[0][1]}-{cl[-1][1]}')
         # a chunk idtrackerai did not identify: name the flies present in the first frame by position, as a human would
         anchor = {}
-        res = solve_clip(ss, machine, validated, nfly, fixed=fixed)
+        carried, carried_from = carry_at(carry, chunk, cl[0][1])
+        res = solve_clip(ss, machine, validated, nfly, fixed=fixed, carry=carried)
         if res is not None and res[1]:
             present = sorted([n for n, s in enumerate(ss) if s['boxes'][0][0] == cl[0][0]],
                              key=lambda n: tuple(ss[n]['boxes'][0][2][:2]))
             anchor = {n: v for v, n in enumerate(present[:nfly])}
-            res = solve_clip(ss, machine, validated, nfly, anchor=anchor, fixed=fixed)
+            res = solve_clip(ss, machine, validated, nfly, anchor=anchor, fixed=fixed, carry=carried)
         if res is None:
             rows.append(dict(where, action='none', confidence='low', first=cl[0][0], last=cl[-1][0],
                              reason='too many tracks to solve', needed=f'review frames {cl[0][0]}-{cl[-1][0]}'))
             continue
         out, _, margin_of = res
         ident = [o[0] for o in out]
+        update_carry(carry, chunk, cl[-1][1], ss, out, anchor, fixed, carried, nfly)
         # fragments given to more than one fly in this clip: every part needs its own label
         frag_ids = collections.defaultdict(set)
         last_holder = {}
@@ -395,6 +484,11 @@ def plan(tracks, names, blank, machine, nfly, filler=None, validated=None, break
                     reasons.append((i, f'fragment {key[1]} has local identity {int(blob.lid)}'))
             if not reasons:
                 continue
+            swapped = sorted({(int(blob.lid), idn) for blob in s['blobs'] if blob is not None and 0 < blob.lid
+                              and carried.get(int(blob.lid), (0,))[0] == idn != int(blob.lid)})
+            if swapped:
+                reasons.append((first, '; '.join(f'idtrackerai local identity {a} was found to be fly {b} before this '
+                                                 f'clip (raw frame {carried_from})' for a, b in swapped)))
             conf = 'high' if n in anchor else confidence(margin)
             summary = collections.OrderedDict()
             for i, r in reasons:
@@ -757,8 +851,11 @@ def assign_task(client, task, detector, args, frames=None, tracks=None):
     if scale is None:
         return dict(summary, skipped=f'raw frame {first} not found in {exp_dir}')
     machine = Machine(db, [fn for cl in clips for _, fn in cl if fn is not None], chunksize, scale)
+    state = CarryState(args.log_dir, C.EXP_RE.search(task.name).group(0) + ('_dry-run' if args.dry_run else ''))
+    carry = state.load()
     rows = plan(tracks, names, blank, machine, nfly, Filler(detector, video, scale), breaks=breaks,
-                apply=getattr(args, 'apply', 'medium'), fixed=fixed)
+                apply=getattr(args, 'apply', 'medium'), fixed=fixed, carry=carry)
+    state.save(carry)
 
     job_of = lambda i: next(j for a, b, j in jobs if a <= i <= b)
     for r in rows:
