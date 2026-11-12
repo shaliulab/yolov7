@@ -32,6 +32,7 @@ import datetime
 import itertools
 import json
 import math
+import re
 import sqlite3
 from pathlib import Path
 
@@ -530,7 +531,26 @@ def experiment(task, args):
     db = exp_dir / f'{m.group(0)}.db'
     if not db.is_file():
         return None, f'{db} not found'
-    return (exp_dir, db, int(m.group(2)[:-1]), C.RawVideo(exp_dir).chunksize), None
+    nfly = number_of_flies(exp_dir, m)
+    if nfly is None:
+        return None, f'number of flies of arena {m.group(4)} not found in {exp_dir}'
+    return (exp_dir, db, nfly, C.RawVideo(exp_dir).chunksize), None
+
+
+def number_of_flies(exp_dir, m):
+    """Flies in the experiment: <N>X of its name, or for an arena (whose <N>X counts the flies of all arenas) the
+    number of animals idtrackerai is configured with in arenas/<N>/<N>.conf (else the .toml of the arena)"""
+    if not m.group(4):
+        return int(m.group(2)[:-1])
+    conf = exp_dir / f'{m.group(4)}.conf'
+    if conf.is_file():
+        return int(json.loads(conf.read_text())['_number_of_animals']['value'])
+    toml = exp_dir / f'{m.group(3)}.toml'
+    if toml.is_file():
+        found = re.search(r'^number_of_animals\s*=\s*(\d+)', toml.read_text(), re.M)
+        if found:
+            return int(found.group(1))
+    return None
 
 
 def assign_task(client, task, detector, args, frames=None, tracks=None):

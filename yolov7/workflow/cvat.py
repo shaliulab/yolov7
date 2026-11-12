@@ -33,7 +33,9 @@ import numpy as np
 
 from yolov7.workflow.common import REPO_ROOT, now
 
-EXP_RE = re.compile(r'(FlyHostel\d+)_(\d+X)_(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})')
+# group(0) is also the stem of the experiment's .db; an arena of a multi-arena experiment (cropped into
+# <experiment dir>/arenas/<N>, its own experiment) is <experiment>_arena<N>
+EXP_RE = re.compile(r'(FlyHostel\d+)_(\d+X)_(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})(?:_arena(\d+))?')
 # <experiment>_<chunk>_<clip start frame>_<index in clip>.png, or <frame>_<what>.png
 CLIP_RE = re.compile(r'_(\d{10})_(\d{6})\.\w+$')
 FRAME_RE = re.compile(r'(?:^|_)(\d{10})(?:_|\.)')
@@ -163,6 +165,8 @@ def experiment_dir(task_name, videos):
     if not m:
         return None
     d = Path(videos) / m.group(1) / m.group(2) / m.group(3)
+    if m.group(4):
+        d = d / 'arenas' / m.group(4)
     return d if (d / 'metadata.yaml').is_file() else None
 
 
