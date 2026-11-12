@@ -13,6 +13,7 @@ between clips are skipped.
     yolov7-cvat predict 2366 --model flyfinder --dry-run  # the production flyfinder instead
     yolov7-cvat predict --project FlyHostel3_2X_2026-10-06_13-00-00
     yolov7-cvat predict --assign --experiment FlyHostel1_3X_2026-09-22_14-00-00  # + identities (yolov7-cvat assign)
+    yolov7-cvat complete 2547 --job 7700                # then settle what assign left to a person, where a rule can
 
 Credentials come from $CVAT_USERNAME / $CVAT_PASSWORD, the server from $CVAT_SERVER (default http://localhost:8080).
 Tasks that already have annotations are skipped unless --append is passed. --assign then gives the tracks their
@@ -427,6 +428,18 @@ def cmd_assign(args):
         A.print_summary(A.assign_task(client, client.tasks.retrieve(tid), detector, args))
 
 
+def cmd_complete(args):
+    from yolov7.workflow import complete as K
+    client = connect(args.server)
+    task_ids = select_tasks(client, args)
+    if args.job and len(task_ids) != 1:
+        raise SystemExit('--job takes one task')
+    detector = load_detector(args)
+    Path(args.log_dir).mkdir(parents=True, exist_ok=True)
+    for tid in task_ids:
+        K.print_summary(K.complete_task(client, client.tasks.retrieve(tid), detector, args))
+
+
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(prog='yolov7-cvat', description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -467,7 +480,18 @@ def parse_args(argv=None):
     p = sub.add_parser('assign', help='give the pre-populated tracks of untouched tasks their identities',
                        description=A.__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     common(p)
+    p.add_argument('--keep-labelled', action='store_true',
+                   help='also run on a task where a person labelled some tracks with identities: the others are '
+                        'decided around them and they are never changed (a disagreement becomes an issue)')
     p.set_defaults(func=cmd_assign)
+
+    from yolov7.workflow import complete as K
+    p = sub.add_parser('complete', help='settle what assign left for a person wherever a rule can, on assigned tasks',
+                       description=K.__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    common(p)
+    p.add_argument('--job', type=int, nargs='+', help='only these jobs of the (single) task')
+    p.add_argument('--from-backup', help='plan on the annotations saved in this backup .json instead (dry run only)')
+    p.set_defaults(func=cmd_complete)
     return parser.parse_args(argv)
 
 

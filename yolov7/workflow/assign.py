@@ -1,6 +1,7 @@
 """yolov7-cvat assign: give the pre-populated tracks of a CVAT identity task their identities, as a validator would
 
-Runs on a task that `yolov7-cvat predict` pre-populated and nobody has touched yet. Per clip and chunk (local
+Runs on a task that `yolov7-cvat predict` pre-populated and nobody has touched yet (with --keep-labelled, also where a
+person labelled some tracks: those are kept as they are and the others decided around them). Per clip and chunk (local
 identities only exist within a chunk):
   1. every box of every track is matched to idtrackerai's blob in that frame (ROI_0 + IDENTITY of the experiment's
      .db): fragment and local identity
@@ -43,6 +44,7 @@ from yolov7.workflow.common import now
 
 MATCH_GATE = 40  # raw px between a box centre and a blob centroid
 VALIDATED_WEIGHT = 20.0
+FIXED_WEIGHT = 1000.0  # a track a person labelled (--keep-labelled)
 ANCHOR_WEIGHT = 5.0  # idtrackerai's identity in the first frame of a clip
 LATE_WEIGHT = 0.3  # ... in later frames, per box
 CONTINUITY_WEIGHT = 10.0  # a clear continuation (CLEAR_MARGIN diagonals better than the alternatives)
@@ -59,6 +61,9 @@ FILL_APPLY_CONF = 0.25  # ... added from this confidence
 FILL_MAX_STEP = 60  # CVAT px per frame between a filled box and where the fly is before/after
 TOUCH_TOL = 1.0  # CVAT px: boxes closer than this touch, and all of them need an identity
 DUPLICATE_INSIDE = 0.9  # a box that is not a fly, has no blob and lies this much inside a box it touches is likely a duplicate
+EXTRA_INSIDE = 0.5  # an extra box at least this much inside a box of fly m can be labelled m (yolov7-cvat complete)
+SPLIT_RATIO = 1.25  # a box this many times longer than the fly's usual box holds two flies (they overlap, so not 2x)
+MERGE_GAP = 8  # frames: a fly seen this close before and after a merged box is where its interpolated box says
 
 
 def fragment_weight(length):
@@ -118,11 +123,13 @@ def segments(tracks, fn_of, chunksize, breaks=()):
     return out
 
 
-def solve_clip(segs, machine, validated, nfly, anchor=None):
+def solve_clip(segs, machine, validated, nfly, anchor=None, fixed=None):
     """Assign identities 1..nfly to the segments of one clip-chunk
 
-    validated: {(chunk, fragment): identity} decided before this clip. Returns ([(identity, margin)] per segment,
-    whether idtrackerai had no identity at all here) or None if the clip is too complex. Identity 0 = not a fly.
+    validated: {(chunk, fragment): identity} decided before this clip. fixed: {track id: identity} labelled by a person.
+    Returns ([(identity, margin)] per segment, whether idtrackerai had no identity at all here, a function giving the
+    margin of any set of forbidden (segment, identity index) pairs) or None if the clip is too complex. Identity 0 =
+    not a fly.
     """
     chunksize = machine.chunksize
     frames = sorted({i for s in segs for i, _, _ in s['boxes']})
@@ -149,6 +156,9 @@ def solve_clip(segs, machine, validated, nfly, anchor=None):
             elif 0 < blob.lid <= nfly:
                 w = fragment_weight(machine.length.get(key, 1))
                 E[k, int(blob.lid) - 1] += ANCHOR_WEIGHT * w if i == first else LATE_WEIGHT * w
+    for k, s in enumerate(segs):
+        if s['track'] in (fixed or {}):
+            E[k, fixed[s['track']] - 1] += FIXED_WEIGHT
     arbitrary = not E.any()
     for n, v in (anchor or {}).items():
         E[n, v] += ANCHOR_WEIGHT
@@ -206,13 +216,14 @@ def solve_clip(segs, machine, validated, nfly, anchor=None):
     start = [s['boxes'][0][0] for s in segs]
     end = [s['boxes'][-1][0] for s in segs]
 
-    def best(forbid=None):
+    def best(forbid=()):
+        forbid = set(forbid)
         states = {tuple([-1] * nfly): (0.0, ())}
         for k in order:
             new = {}
             for holders, (sc, hist) in states.items():
                 for v in range(nfly + 1):
-                    if forbid == (k, v):
+                    if (k, v) in forbid:
                         continue
                     if v == nfly:  # not one of the flies (a duplicate or spurious box): any number of them
                         gain, nh = -NOT_A_FLY_PENALTY * len(segs[k]['boxes']), holders
@@ -235,11 +246,14 @@ def solve_clip(segs, machine, validated, nfly, anchor=None):
     if top is None:
         return None
     top_score, assign = top
-    out = []
-    for k in range(len(segs)):
-        alt = best((k, assign[k]))
-        out.append(((assign[k] + 1) % (nfly + 1), top_score - (alt[0] if alt else -np.inf)))
-    return out, arbitrary
+
+    def margin(forbid):
+        """How much worse the best assignment that avoids every (segment, 0-based identity) pair in forbid is"""
+        alt = best(forbid)
+        return float(top_score - (alt[0] if alt else -np.inf))
+
+    out = [((assign[k] + 1) % (nfly + 1), margin({(k, assign[k])})) for k in range(len(segs))]
+    return out, arbitrary, margin
 
 
 def confidence(margin):
@@ -284,13 +298,19 @@ class Filler:
         return d[j], float(np.linalg.norm(c[j] - expected))
 
 
-def plan(tracks, names, blank, machine, nfly, filler=None, validated=None, breaks=(), apply='medium'):
+def plan(tracks, names, blank, machine, nfly, filler=None, validated=None, breaks=(), apply='medium', fixed=None,
+         extra_boxes=False):
     """Decisions for the tracks {track id: [(cvat frame, box)]} of a task -> rows (dicts)
 
     action: 'label track' (track, first, last = the per-chunk part, identity), 'add box' (first, identity, box) or
     'none'; needed: what a person still has to do ('' if nothing).
     apply: lowest confidence ('medium' or 'high') of the decisions applied; the others are left to a person.
+    fixed: {track id: identity} of tracks a person labelled: the other tracks are decided around them, and they are
+    never changed (where the plan cannot agree with one, it is an issue).
+    extra_boxes: label an extra box on a fly (a duplicate, or a part of the fly) with that fly's identity when the clip
+    is clearly worse without the fly there (yolov7-cvat complete), instead of leaving it to a person.
     """
+    fixed = fixed or {}
     chunksize = machine.chunksize
     clips = C.clips_of(names, chunksize, breaks)
     fn_of = {i: fn for cl in clips for i, fn in cl}
@@ -318,17 +338,17 @@ def plan(tracks, names, blank, machine, nfly, filler=None, validated=None, break
         where = dict(clip=k, chunk=chunk, frames=f'{cl[0][0]}-{cl[-1][0]}', raw=f'{cl[0][1]}-{cl[-1][1]}')
         # a chunk idtrackerai did not identify: name the flies present in the first frame by position, as a human would
         anchor = {}
-        res = solve_clip(ss, machine, validated, nfly)
+        res = solve_clip(ss, machine, validated, nfly, fixed=fixed)
         if res is not None and res[1]:
             present = sorted([n for n, s in enumerate(ss) if s['boxes'][0][0] == cl[0][0]],
                              key=lambda n: tuple(ss[n]['boxes'][0][2][:2]))
             anchor = {n: v for v, n in enumerate(present[:nfly])}
-            res = solve_clip(ss, machine, validated, nfly, anchor=anchor)
+            res = solve_clip(ss, machine, validated, nfly, anchor=anchor, fixed=fixed)
         if res is None:
             rows.append(dict(where, action='none', confidence='low', first=cl[0][0], last=cl[-1][0],
                              reason='too many tracks to solve', needed=f'review frames {cl[0][0]}-{cl[-1][0]}'))
             continue
-        out = res[0]
+        out, _, margin_of = res
         ident = [o[0] for o in out]
         # fragments given to more than one fly in this clip: every part needs its own label
         frag_ids = collections.defaultdict(set)
@@ -392,9 +412,17 @@ def plan(tracks, names, blank, machine, nfly, filler=None, validated=None, break
         for key in shared:
             validated[key] = last_holder[key][1]
         added = missing_flies(ss, ident, cl, where, chunk, machine, nfly, validated, filler, apply)
-        overlapping(ss, out, row_of, added, track_of, apply)
+        overlapping(ss, out, row_of, added, track_of, apply, margin_of if extra_boxes else None)
         rows += [row_of[n] for n in sorted(row_of)] + added
-    return rows
+    out = []
+    for r in rows:
+        if r.get('track') in fixed and r['action'] == 'label track':
+            if r['identity'] == fixed[r['track']]:
+                continue
+            r = dict(r, action='none', needed=f"check frames {r['first']}-{r['last']}",
+                     reason=f"labelled {fixed[r['track']]} by a person, the plan says {r['identity']}: {r['reason']}")
+        out.append(r)
+    return out
 
 
 def touching(a, b, tol=TOUCH_TOL):
@@ -402,7 +430,47 @@ def touching(a, b, tol=TOUCH_TOL):
     return a[0] <= b[2] + tol and b[0] <= a[2] + tol and a[1] <= b[3] + tol and b[1] <= a[3] + tol
 
 
-def overlapping(ss, out, row_of, added, track_of, apply='medium'):
+def extra_box_clusters(ss, out, by_frame, added_ids):
+    """{segment: (identity m, members)} for every group of mutually touching segments that involves one fly only
+
+    A group is the segments connected by touching boxes (in any frame); it involves one fly when the identities the
+    solver gave its members, and those of the added boxes they touch, are a single m: the other members are extra boxes
+    on fly m. added_ids: {frame: [(box, identity)]} of the boxes added for missing flies.
+    """
+    adj = collections.defaultdict(set)
+    touch_added = collections.defaultdict(set)
+    for i, boxes in by_frame.items():
+        segs = [(n, b) for n, b, _ in boxes if n is not None]
+        for (n1, b1), (n2, b2) in itertools.combinations(segs, 2):
+            if touching(b1, b2):
+                adj[n1].add(n2)
+                adj[n2].add(n1)
+        for n, b in segs:
+            for ab, m in added_ids.get(i, []):
+                if touching(b, ab):
+                    touch_added[n].add(m)
+    clusters = {}
+    seen = set()
+    for n in adj:
+        if n in seen:
+            continue
+        members, stack = set(), [n]
+        while stack:
+            k = stack.pop()
+            if k in members:
+                continue
+            members.add(k)
+            stack.extend(adj[k])
+        seen |= members
+        ids = {out[k][0] for k in members if out[k][0] > 0} | {m for k in members for m in touch_added[k]}
+        if len(ids) == 1:
+            m = ids.pop()
+            for k in members:
+                clusters[k] = (m, members)
+    return clusters
+
+
+def overlapping(ss, out, row_of, added, track_of, apply='medium', margin_of=None):
     """Label every track whose box touches another box in some frame, even by one pixel
 
     Downstream, a labelled box gives its identity to every fly whose blob it overlaps, so where boxes touch every one
@@ -411,17 +479,40 @@ def overlapping(ss, out, row_of, added, track_of, apply='medium'):
     duplicate, otherwise label it); nothing is deleted automatically.
 
     track_of(n): the row fields of segment n
+    margin_of(forbid): the solver's margin function (solve_clip). With it, an extra box on a fly is labelled with that
+    fly's identity: it touches boxes of one fly m only, lies at least EXTRA_INSIDE inside one of them, and the clip is
+    clearly worse (margin >= MEDIUM) with none of the touching boxes as fly m. Downstream, flyhostel keeps one box per
+    identity and frame, so the duplicate is harmless, and a box on a part of the fly is right.
     """
     by_frame = collections.defaultdict(list)  # frame -> [(segment or None for an added box, box)]
+    added_ids = collections.defaultdict(list)
     for n, s in enumerate(ss):
         for (i, _, b), blob in zip(s['boxes'], s['blobs']):
             by_frame[i].append((n, b, blob))
     for r in added:
         if r['action'] == 'add box':
             by_frame[r['first']].append((None, np.asarray(r['box'], float), None))
+            added_ids[r['first']].append((np.asarray(r['box'], float), r['identity']))
     def inside(a, b):  # fraction of the smaller box inside the other
         inter = np.prod(np.clip(np.minimum(a[2:], b[2:]) - np.maximum(a[:2], b[:2]), 0, None))
         return float(inter / max(min(np.prod(a[2:] - a[:2]), np.prod(b[2:] - b[:2])), 1e-9))
+
+    clusters = extra_box_clusters(ss, out, by_frame, added_ids) if margin_of else {}
+    cluster_margin = {}
+
+    def extra_box(n, b, boxes, i):
+        """(identity, margin) when the box b of segment n is an extra box on a fly, else None"""
+        if n not in clusters:
+            return None
+        m, members = clusters[n]
+        same = [ob for k, ob, _ in boxes if k != n and k in members and touching(b, ob)]
+        same += [ab for ab, am in added_ids.get(i, []) if am == m and touching(b, ab)]
+        if not same or max(inside(b, ob) for ob in same) < EXTRA_INSIDE:
+            return None
+        key = frozenset(members)
+        if key not in cluster_margin:
+            cluster_margin[key] = margin_of({(k, m - 1) for k in members})
+        return m, cluster_margin[key]
 
     for i, boxes in sorted(by_frame.items()):
         for n, b, blob in boxes:
@@ -433,6 +524,17 @@ def overlapping(ss, out, row_of, added, track_of, apply='medium'):
             idn, margin = out[n]
             first, last = ss[n]['boxes'][0][0], ss[n]['boxes'][-1][0]
             why = f'box touches another box (frame {i})'
+            extra = extra_box(n, b, boxes, i) if idn == 0 or confidence(margin) == 'low' else None
+            if extra is not None and confidence(extra[1]) != 'low':
+                m, cm = extra
+                conf = confidence(cm)
+                action, needed = label_decision(conf, m, [first, last], apply)
+                row_of[n] = dict(track_of(n), action=action, identity=m, confidence=conf, margin=round(cm, 2),
+                                 reason=f'extra box on fly {m} (frame {i}): touches only boxes of fly {m}, '
+                                        f'{"not one of the flies" if idn == 0 else "unclear which box is the fly"} '
+                                        'otherwise; a duplicate or a part of the fly, harmless with its identity',
+                                 needed=needed)
+                continue
             if idn == 0:
                 # never deleted automatically: a person decides
                 frac = max(inside(b, ob) for ob in others)
@@ -469,11 +571,15 @@ def missing_flies(ss, ident, cl, where, chunk, machine, nfly, validated, filler,
             size = np.mean([b[2:] - b[:2] for _, b in ref], axis=0)
             guess = np.r_[expected - size / 2, expected + size / 2]
             gap = max(abs(j - i) for j, _ in ref)
-            # does idtrackerai have this fly? a blob no prediction box was matched to, near where it should be
+            # does idtrackerai have this fly? a blob no prediction box was matched to, near where it should be, and not
+            # inside the box of another fly (a take-off streak or a touching fly segmented as two blobs: the fly is
+            # not where that blob says)
+            existing = np.array([b[2] for s in ss for b in s['boxes'] if b[0] == i]).reshape(-1, 4)
             g = machine.by_fn.get(fn)
             used = {int(blob.ifi) for s in ss for b, blob in zip(s['boxes'], s['blobs']) if b[0] == i and blob is not None}
+            inside_box = lambda r: any((e[0] <= r.x / scale <= e[2]) and (e[1] <= r.y / scale <= e[3]) for e in existing)
             spare = [] if g is None else [
-                r for r in g.itertuples() if r.ifi not in used and
+                r for r in g.itertuples() if r.ifi not in used and not inside_box(r) and
                 np.hypot(r.x / scale - expected[0], r.y / scale - expected[1]) <= FILL_MAX_STEP * gap]
             if spare:
                 blob = min(spare, key=lambda r: np.hypot(r.x / scale - expected[0], r.y / scale - expected[1]))
@@ -489,7 +595,17 @@ def missing_flies(ss, ident, cl, where, chunk, machine, nfly, validated, filler,
                                  needed=f'check the box added for fly {m} in frame {i}' if ok else
                                  f'add box for fly {m} in frame {i} (where idtrackerai has a blob, drawn here)'))
                 continue
-            existing = np.array([b[2] for s in ss for b in s['boxes'] if b[0] == i]).reshape(-1, 4)
+            merged = split_box(ss, ident, i, m, expected, size, gap)
+            if merged is not None:
+                box, n, ratio, how = merged
+                ok = applies('medium', apply)
+                rows.append(dict(row, action='add box' if ok else 'none', box=box, confidence='medium',
+                                 reason=f'fly {m} not in the predictions in frame {i}; the box of fly {n} there is '
+                                        f'{ratio:.2f}x the usual length of fly {n}: two flies in one box, fly {m} gets '
+                                        f'{how}',
+                                 needed=f'check the box added for fly {m} in frame {i} (shares a box with fly {n})' if ok
+                                 else f'add box for fly {m} in frame {i} (shares a box with fly {n}, drawn here)'))
+                continue
             found = filler(fn, existing, expected) if filler else None
             if found is not None and found[0][4] >= FILL_REPORT_CONF and found[1] <= FILL_MAX_STEP * gap:
                 d, dist = found
@@ -507,19 +623,64 @@ def missing_flies(ss, ident, cl, where, chunk, machine, nfly, validated, filler,
     return rows
 
 
-def server_tracks(ann, unassigned):
-    """{track id: [(cvat frame, box)]} of the pre-populated tracks, or the reason the task cannot be assigned"""
+def split_box(ss, ident, i, m, expected, size, gap):
+    """A box for the missing fly m in frame i, where it shares an oversized box with another fly
+    -> (box, that fly, length ratio, how the box was drawn) or None
+
+    Two flies in a line (or one on the other) are often one detection: a box SPLIT_RATIO times longer than the usual
+    box of the fly it was given to, where fly m is expected. Fly m gets its box interpolated from where it is before
+    and after when both are within MERGE_GAP frames (as a validator does with keyframes; the flies barely move while
+    together), otherwise the half of the shared box nearest to where it is expected.
+    """
+    guess = np.r_[expected - size / 2, expected + size / 2]
+    best = None
+    for n, s in enumerate(ss):
+        if ident[n] in (0, m):
+            continue
+        here = [b for f, _, b in s['boxes'] if f == i]
+        if not here or not touching(here[0], guess):
+            continue
+        b = here[0]
+        usual = np.median([max(ob[2:] - ob[:2]) for t, seg in enumerate(ss) if ident[t] == ident[n]
+                           for _, _, ob in seg['boxes']])
+        ratio = max(b[2:] - b[:2]) / max(usual, 1e-9)
+        if ratio < SPLIT_RATIO:
+            continue
+        axis = int(np.argmax(b[2:] - b[:2]))
+        mid = (b[axis] + b[axis + 2]) / 2
+        a, c = b.copy(), b.copy()
+        a[axis + 2], c[axis] = mid, mid
+        half = min((a, c), key=lambda h: np.linalg.norm((h[:2] + h[2:]) / 2 - expected))
+        box, how = (guess, 'its box interpolated from before and after') if gap <= MERGE_GAP else (half, 'the half nearest to it')
+        if best is None or ratio > best[2]:
+            best = (box, ident[n], float(ratio), how)
+    return best
+
+
+def server_tracks(ann, unassigned, identities=None):
+    """({track id: [(cvat frame, box)]} of the pre-populated tracks, {track id: identity} of those a person labelled),
+    or (None, the reason the task cannot be assigned)
+
+    identities: {label id: identity} of the identity labels, to keep the tracks labelled with them (--keep-labelled);
+    otherwise any labelled or edited track makes the task touched.
+    """
     if ann.shapes or ann.tags:
         return None, f'{len(ann.shapes) + len(ann.tags)} shapes/tags'
-    touched = [t for t in ann.tracks if t.label_id != unassigned or t.source != 'auto']
-    if touched:
-        return None, f'{len(touched)} tracks already labelled or edited'
+    if identities is None:
+        touched = [t for t in ann.tracks if t.label_id != unassigned or t.source != 'auto']
+        if touched:
+            return None, f'{len(touched)} tracks already labelled or edited'
+    else:
+        other = [t for t in ann.tracks if t.label_id != unassigned and t.label_id not in identities]
+        if other:
+            return None, f'{len(other)} tracks with a label that is neither {unassigned!r} nor an identity'
+    fixed = {t.id: identities[t.label_id] for t in ann.tracks if identities and t.label_id in identities}
     tracks = {}
     for t in ann.tracks:
         vis = sorted([s for s in t.shapes if not s.outside], key=lambda s: s.frame)
         if vis:
             tracks[t.id] = [(s.frame, np.array(s.points[:4], float)) for s in vis]
-    return tracks, None
+    return tracks, fixed
 
 
 def experiment(task, args):
@@ -571,12 +732,17 @@ def assign_task(client, task, detector, args, frames=None, tracks=None):
     if args.label not in labels or missing:
         return dict(summary, skipped=f'labels {missing or [args.label]} not in the task')
     ann = task.get_annotations()
+    fixed = {}
     if tracks is None:
-        tracks, why = server_tracks(ann, labels[args.label])
+        keep = getattr(args, 'keep_labelled', False)
+        identities = {labels[str(v)]: v for v in range(1, nfly + 1)} if keep else None
+        tracks, why = server_tracks(ann, labels[args.label], identities)
+        if tracks is None:
+            return dict(summary, skipped=f'{why}: assign only runs on untouched pre-populated tasks'
+                                         + ('' if keep else ' (or pass --keep-labelled)'))
+        fixed = why
     elif not args.dry_run:
         raise ValueError('tracks are only given for a dry run')
-    if tracks is None:
-        return dict(summary, skipped=f'{why}: assign only runs on untouched pre-populated tasks')
 
     names = [f.name for f in task.get_meta().frames]
     frames = frames if frames is not None else C.cvat_frames(task)
@@ -592,13 +758,13 @@ def assign_task(client, task, detector, args, frames=None, tracks=None):
         return dict(summary, skipped=f'raw frame {first} not found in {exp_dir}')
     machine = Machine(db, [fn for cl in clips for _, fn in cl if fn is not None], chunksize, scale)
     rows = plan(tracks, names, blank, machine, nfly, Filler(detector, video, scale), breaks=breaks,
-                apply=getattr(args, 'apply', 'medium'))
+                apply=getattr(args, 'apply', 'medium'), fixed=fixed)
 
     job_of = lambda i: next(j for a, b, j in jobs if a <= i <= b)
     for r in rows:
         r['job'] = job_of(r['first'])
     counts = collections.Counter((r['action'], r['confidence']) for r in rows)
-    summary.update(nfly=nfly, chunksize=chunksize, scale=round(scale, 3), db=str(db), tracks=len(tracks),
+    summary.update(nfly=nfly, kept=len(fixed), chunksize=chunksize, scale=round(scale, 3), db=str(db), tracks=len(tracks),
                    labelled=sum(r['action'] == 'label track' for r in rows),
                    to_check=sum(r['action'] != 'none' and bool(r['needed']) for r in rows),
                    added=sum(r['action'] == 'add box' for r in rows),
@@ -613,17 +779,37 @@ def assign_task(client, task, detector, args, frames=None, tracks=None):
     if args.dry_run:
         return summary
 
-    stamp = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
-    backup = log_dir / f'task_{task.id}_assign_{stamp}_backup.json'
-    backup.write_text(json.dumps(ann.to_dict(), default=str))
-    summary['backup'] = str(backup)
+    summary['backup'] = str(backup_annotations(ann, log_dir, task.id, 'assign'))
+    summary.update(apply_rows(client, task, rows, tracks, fixed, labels, clips, chunksize, breaks, frames[0].shape[:2],
+                              args.label))
+    return summary
 
+
+def backup_annotations(ann, log_dir, task_id, what):
+    stamp = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
+    backup = Path(log_dir) / f'task_{task_id}_{what}_{stamp}_backup.json'
+    backup.write_text(json.dumps(ann.to_dict(), default=str))
+    return backup
+
+
+def apply_rows(client, task, rows, tracks, fixed, labels, clips, chunksize, breaks, hw, unassigned, tag='assign',
+               skip_issue=lambda r: False):
+    """Apply the rows of plan() to the task: labelled tracks re-created with their identity, boxes added, and a CVAT
+    issue for what a person still has to do -> dict(issues=n)
+
+    Tracks with a negative id are shapes (one-frame tracks), never changed. skip_issue(row): whether the issue of a row
+    exists already (yolov7-cvat complete).
+    """
+    from cvat_sdk.api_client import models
+    jobs = sorted((j.start_frame, j.stop_frame, j.id) for j in task.get_jobs())
+    job_of = lambda i: next(j for a, b, j in jobs if a <= i <= b)
     # tracks that change: those labelled, and those crossing a chunk or a job (older predictions): one new track per
     # part
     fn_of = {i: fn for cl in clips for i, fn in cl}
     label_of = {(r['track'], r['first'], r['last']): r['identity'] for r in rows if r['action'] == 'label track'}
     parts = collections.Counter(s['track'] for s in segments(tracks, fn_of, chunksize, breaks))
-    changed = {t for t, _, _ in label_of} | {t for t, n in parts.items() if n > 1}
+    changed = ({t for t, _, _ in label_of} | {t for t, n in parts.items() if n > 1}) - set(fixed)
+    changed = {t for t in changed if t >= 0}
     rect = lambda frame, box, outside=False: models.TrackedShapeRequest(
         type=models.ShapeType('rectangle'), frame=frame, points=[float(v) for v in box], outside=outside,
         occluded=False, keyframe=True)
@@ -634,7 +820,7 @@ def assign_task(client, task, detector, args, frames=None, tracks=None):
         shapes = [rect(i, box) for i, _, box in s['boxes']]
         if b + 1 < task.size and b + 1 not in breaks:
             shapes.append(rect(b + 1, s['boxes'][-1][2], outside=True))
-        create.append(models.LabeledTrackRequest(frame=a, label_id=labels[str(ident)] if ident else labels[args.label],
+        create.append(models.LabeledTrackRequest(frame=a, label_id=labels[str(ident)] if ident else labels[unassigned],
                                                  group=0, source='semi-auto' if ident else 'auto', shapes=shapes,
                                                  attributes=[]))
     boxes = [models.LabeledShapeRequest(type=models.ShapeType('rectangle'), frame=int(r['first']),
@@ -645,19 +831,18 @@ def assign_task(client, task, detector, args, frames=None, tracks=None):
         task.remove_annotations(ids=sorted(changed))
     C.upload(client, task, tracks=create, shapes=boxes)
     # what a person still has to do: an issue on the frame, around the box concerned (the whole frame if none)
-    h, w = frames[0].shape[:2]
+    h, w = hw
     issues = 0
     for r in rows:
-        if not r['needed']:
+        if not r['needed'] or skip_issue(r):
             continue
         box = r.get('box')
         box = [0, 0, w, h] if box is None else [float(np.clip(v, 0, (w, h)[k % 2])) for k, v in enumerate(box)]
         client.issues.create(models.IssueWriteRequest(
-            frame=int(r['first']), job=int(r['job']), position=box,
-            message=f"[yolov7-cvat assign] {r['needed']}: {r['reason']}"))
+            frame=int(r['first']), job=int(job_of(int(r['first']))), position=box,
+            message=f"[yolov7-cvat {tag}] {r['needed']}: {r['reason']}"))
         issues += 1
-    summary['issues'] = issues
-    return summary
+    return dict(issues=issues)
 
 
 def write_rows(rows, path):
